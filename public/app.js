@@ -1,3 +1,10 @@
+// Prevent unwanted Web3 provider injections
+if (window.ethereum) {
+    console.log('Ethereum provider detected, but not used in this application');
+    // Optionally, you can remove window.ethereum if it's causing issues
+    // delete window.ethereum;
+}
+
 // REKT Drift Protocol API Interface
 class DriftAPIInterface {
     constructor() {
@@ -15,11 +22,20 @@ class DriftAPIInterface {
         
         // Override console methods to capture logs
         this.setupConsoleCapture();
+        // Application configuration
         this.config = {
+            // API and WebSocket endpoints
             apiUrl: 'http://localhost:3004/api',
             wsUrl: 'ws://localhost:3004',
             walletAddress: null,
-            solanaRpc: 'https://api.mainnet-beta.solana.com'  // Simple mainnet RPC
+            
+            // Solana RPC configuration - Using RPC Pool
+            solanaRpc: 'https://austbot-austbot-234b.mainnet.rpcpool.com/a30e04d0-d9d6-4ac1-8503-38217fdb2821',
+            
+            // Drift Protocol configuration
+            driftProgramId: 'dRiftyHA39MWEa3pc9prcb94Ym6ZoTKp357Dq4QBSgHX',
+            driftStateAccount: 'Dd4vYjKj3tFkZ3fM4Rxqk6SJToZ9TvLtqYG8j5RfQ2hx',
+            wsEndpoint: window.location.hostname === 'localhost' ? 'ws://localhost:3004' : 'wss://your-production-url.com'
         };
         
         // Initialize markets array
@@ -459,34 +475,69 @@ class DriftAPIInterface {
     // Wallet Connection Methods
     async connectWallet() {
         try {
+            // Check if we're in a browser environment
+            if (typeof window === 'undefined') {
+                this.showTradeStatus('error', 'This application requires a web browser.');
+                this.logMessage('error', 'Window object not available');
+                return;
+            }
+
+            // Check if Phantom is available
+            if (!window.solana) {
+                // Open Phantom install page in a new tab
+                window.open('https://phantom.app/', '_blank');
+                this.showTradeStatus('error', 'Phantom wallet not detected. Opening Phantom wallet installation page...');
+                this.logMessage('error', 'Phantom wallet not detected');
+                return;
+            }
+
             // Check if Phantom is installed
-            if (!window.solana || !window.solana.isPhantom) {
-                this.showTradeStatus('error', 'Phantom wallet not found. Please install Phantom wallet extension.');
+            if (!window.solana.isPhantom) {
+                this.showTradeStatus('error', 'Phantom wallet not found. Please install the Phantom wallet extension.');
+                this.logMessage('error', 'Phantom wallet extension not detected');
                 return;
             }
 
             this.logMessage('info', '👛 Connecting to Phantom wallet...');
             
-            // Connect to Phantom
-            const response = await window.solana.connect();
-            this.wallet = window.solana;
-            this.isWalletConnected = true;
-            
-            const walletAddress = response.publicKey.toString();
-            this.config.walletAddress = walletAddress;
-            
-            // Update UI
-            this.updateWalletUI(walletAddress);
-            
-            // Fetch USDC balance
-            await this.fetchUSDCBalance();
-            
-            this.logMessage('success', `✅ Wallet connected: ${walletAddress.substring(0, 8)}...`);
+            try {
+                // Connect to Phantom
+                const response = await window.solana.connect({ onlyIfTrusted: false });
+                
+                if (!response || !response.publicKey) {
+                    throw new Error('Invalid response from wallet');
+                }
+                
+                this.wallet = window.solana;
+                this.isWalletConnected = true;
+                const walletAddress = response.publicKey.toString();
+                this.config.walletAddress = walletAddress;
+                
+                // Update UI
+                this.updateWalletUI(walletAddress);
+                
+                // Fetch USDC balance
+                await this.fetchUSDCBalance();
+                
+                this.logMessage('success', `✅ Wallet connected: ${walletAddress.substring(0, 8)}...`);
+                
+            } catch (error) {
+                console.error('Phantom connection error:', error);
+                const errorMessage = error.message || 'Unknown error occurred';
+                this.logMessage('error', `❌ Failed to connect to Phantom: ${errorMessage}`);
+                this.showTradeStatus('error', `Failed to connect wallet: ${errorMessage}`);
+                
+                // If user rejected the request
+                if (error.code === 4001 || error.code === -32603) {
+                    this.showTradeStatus('error', 'Connection was rejected. Please try again.');
+                }
+            }
             
         } catch (error) {
-            console.error('Wallet connection error:', error);
-            this.logMessage('error', `❌ Failed to connect wallet: ${error.message}`);
-            this.showTradeStatus('error', 'Failed to connect wallet. Please try again.');
+            console.error('Unexpected error in connectWallet:', error);
+            const errorMessage = error.message || 'Unknown error occurred';
+            this.logMessage('error', `❌ Unexpected error: ${errorMessage}`);
+            this.showTradeStatus('error', 'An unexpected error occurred. Please try again.');
         }
     }
 
@@ -693,6 +744,12 @@ class DriftAPIInterface {
             this.updateTransactionStep('phantom', 'active');
             this.showTradeStatus('loading', '🦋 Please approve the transaction in your Phantom wallet...');
             
+            // Get a fresh blockhash before signing
+            const connection = new window.solanaWeb3.Connection(this.config.solanaRpc, 'confirmed');
+            const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+            transaction.recentBlockhash = blockhash;
+            transaction.lastValidBlockHeight = lastValidBlockHeight;
+            
             const signedTransaction = await this.wallet.signTransaction(transaction);
             
             // Step 5: Submit to blockchain
@@ -700,8 +757,24 @@ class DriftAPIInterface {
             this.updateTransactionStep('submit', 'active');
             this.showTradeStatus('loading', '⚡ Submitting transaction to Solana blockchain...');
             
-            // Submit transaction via backend proxy to avoid 403 errors
-            const signature = await this.submitTransactionViaBackend(signedTransaction);
+            try {
+                // Submit transaction via backend proxy to avoid 403 errors
+                const signature = await this.submitTransactionViaBackend(signedTransaction);
+            } catch (error) {
+                if (error.message.includes('block height exceeded') || error.message.includes('Blockhash not found')) {
+                    // If the blockhash expired, refresh it and try again
+                    this.logMessage('info', '🔄 Blockhash expired, refreshing and retrying...');
+                    const { blockhash: newBlockhash, lastValidBlockHeight: newLastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+                    transaction.recentBlockhash = newBlockhash;
+                    transaction.lastValidBlockHeight = newLastValidBlockHeight;
+                    
+                    // Re-sign the transaction with the new blockhash
+                    const reSignedTx = await this.wallet.signTransaction(transaction);
+                    const signature = await this.submitTransactionViaBackend(reSignedTx);
+                    return signature;
+                }
+                throw error; // Re-throw if it's a different error
+            }
             
             this.logMessage('success', `📤 Transaction submitted: ${signature}`);
             
@@ -777,59 +850,53 @@ class DriftAPIInterface {
                     marketSymbol: 'SOL-PERP'
                 })
             });
+
+            const result = await response.json();
             
             if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.message || 'Backend trade submission failed');
+                throw new Error(result.error || 'Failed to create trade transaction');
             }
-            
-            const result = await response.json();
-            if (!result.success) {
-                const errMsg = result.message || result.error || 'Trade submission failed (backend)';
-                this.logMessage('error', `❌ Backend error: ${errMsg}`);
-                if (result.simulationLogs) {
-                    console.error('📝 Simulation logs:\n', result.simulationLogs.join('\n'));
-                }
-                throw new Error(errMsg);
+
+            if (!result.transactionData) {
+                throw new Error('Invalid response from server: missing transaction data');
             }
-            this.logMessage('success', `✅ ${result.message}`);
-            
-            // Convert base64 transaction to proper Solana Transaction object
-            console.log('📦 Creating Solana Transaction object for Phantom signing...');
+
+            this.logMessage('success', '✅ Backend prepared transaction data successfully');
             
             try {
-                // Convert base64 transaction to proper Solana Transaction object
-                const binaryString = atob(result.transaction);
-                const transactionBuffer = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    transactionBuffer[i] = binaryString.charCodeAt(i);
+                const { Transaction, PublicKey, SystemProgram, TransactionInstruction } = window.solanaWeb3;
+                const { instructions, blockhash, lastValidBlockHeight, feePayer } = result.transactionData;
+                
+                // Create a new transaction
+                const transaction = new Transaction({
+                    feePayer: new PublicKey(feePayer),
+                    blockhash,
+                    lastValidBlockHeight
+                });
+                
+                // Convert each instruction to a TransactionInstruction
+                for (const ix of instructions) {
+                    // Convert any public keys in the keys array
+                    const keys = (ix.keys || []).map(key => ({
+                        pubkey: new PublicKey(key.pubkey),
+                        isSigner: key.isSigner,
+                        isWritable: key.isWritable
+                    }));
+                    
+                    // Create a new transaction instruction
+                    const instruction = new TransactionInstruction({
+                        keys,
+                        programId: new PublicKey(ix.programId),
+                        data: Uint8Array.from(atob(ix.data), c => c.charCodeAt(0))
+                    });
+                    
+                    transaction.add(instruction);
                 }
                 
-                // Check if this is mock data (small buffer size indicates mock)
-                if (transactionBuffer.length < 100) {
-                    console.log('🧪 Detected mock transaction data, creating mock transaction object');
-                    return {
-                        serialize: () => transactionBuffer,
-                        orderParams: result.orderParams,
-                        isMock: true
-                    };
-                }
-                
-                if (typeof window.solanaWeb3 !== 'undefined' && window.solanaWeb3.Transaction) {
-                    const transaction = window.solanaWeb3.Transaction.from(transactionBuffer);
-                    return transaction;
-                } else {
-                    // Fallback: return a transaction-like object for signing
-                    console.warn('Solana web3.js not available, using fallback transaction format');
-                    return {
-                        serialize: () => transactionBuffer,
-                        orderParams: result.orderParams
-                    };
-                }
-                
+                return transaction;
             } catch (error) {
-                console.error('❌ Transaction conversion error:', error);
-                throw new Error(`Transaction format error: ${error.message}`);
+                console.error('❌ Transaction creation error:', error);
+                throw new Error(`Transaction creation error: ${error.message}`);
             }
             
         } catch (error) {
@@ -887,7 +954,18 @@ class DriftAPIInterface {
      */
     async submitTransactionViaBackend(signedTransaction) {
         try {
-            const signedTransactionBase64 = btoa(String.fromCharCode(...signedTransaction.serialize()));
+            // Serialize the transaction to send to the backend
+            const serializedTx = signedTransaction.serialize({
+                requireAllSignatures: false,
+                verifySignatures: false
+            });
+            
+            // Convert Uint8Array to base64 in a browser-compatible way
+            const signedTransactionBase64 = btoa(
+                Array.from(serializedTx, byte => String.fromCharCode(byte)).join('')
+            );
+            
+            this.logMessage('info', '📤 Sending signed transaction to backend for submission...');
             
             const response = await fetch('/api/transaction/submit', {
                 method: 'POST',
@@ -901,14 +979,22 @@ class DriftAPIInterface {
             
             const result = await response.json();
             
-            if (!response.ok || !result.success) {
-                throw new Error(result.error || result.message || 'Transaction submission failed');
+            if (!response.ok) {
+                const errorMsg = result.error || result.message || 'Transaction submission failed';
+                this.logMessage('error', `❌ Backend error: ${errorMsg}`);
+                throw new Error(errorMsg);
             }
             
+            if (!result.success) {
+                throw new Error(result.message || 'Transaction submission failed');
+            }
+            
+            this.logMessage('success', `✅ Transaction submitted successfully: ${result.signature}`);
             return result.signature;
             
         } catch (error) {
-            this.logMessage('error', `❌ Backend transaction submission failed: ${error.message}`);
+            this.logMessage('error', `❌ Transaction submission failed: ${error.message}`);
+            console.error('Transaction submission error:', error);
             throw error;
         }
     }

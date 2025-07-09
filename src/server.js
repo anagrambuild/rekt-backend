@@ -7,24 +7,46 @@ const { Connection, PublicKey, Transaction } = require('@solana/web3.js');
 const { DriftClient, Wallet, initialize, BN, PRICE_PRECISION, OrderType, PositionDirection } = require('@drift-labs/sdk');
 const fetch = require('node-fetch');
 
-// Solana RPC configuration - Using user's RPC endpoint
-const CUSTOM_RPC_URL = 'https://austbot-austbot-234b.mainnet.rpcpool.com/a30e04d0-d9d6-4ac1-8503-38217fdb2821';
+// Solana RPC configuration - Using RPC Pool
+const RPC_POOL_URL = 'https://austbot-austbot-234b.mainnet.rpcpool.com/a30e04d0-d9d6-4ac1-8503-38217fdb2821';
 
-// Backup Syndica RPC for balance fetching
-const SYNDICA_API_KEY = '2reYYXMi3PzC2KoDi2Vf4xSzSB57tWDki9orZosWeR4zdj7rc5Ht9FgbVT5YYJUWNugzjD6faFRnVxkppRXbPKz9YHn3wgkoRx';
-const SYNDICA_RPC_URL = `https://solana-mainnet.api.syndica.io/api-key/${SYNDICA_API_KEY}`;
+// Use RPC Pool as the primary RPC
+const CUSTOM_RPC_URL = RPC_POOL_URL;
 
 // RPC Rate limiting
 let lastRpcCall = 0;
-const RPC_MIN_INTERVAL = 250;
+const RPC_MIN_INTERVAL = 1000; // Increased from 250ms to 1000ms (1 second)
+const MAX_RETRIES = 5;
+const INITIAL_RETRY_DELAY = 1000; // 1 second
 
 const rpcRateLimit = async () => {
   const now = Date.now();
   const timeSinceLastCall = now - lastRpcCall;
   if (timeSinceLastCall < RPC_MIN_INTERVAL) {
-    await new Promise(resolve => setTimeout(resolve, RPC_MIN_INTERVAL - timeSinceLastCall));
+    const delay = RPC_MIN_INTERVAL - timeSinceLastCall;
+    console.log(`⏳ Rate limiting: Waiting ${delay}ms before next RPC call...`);
+    await new Promise(resolve => setTimeout(resolve, delay));
   }
   lastRpcCall = Date.now();
+};
+
+const withRetry = async (fn, retries = MAX_RETRIES, delay = INITIAL_RETRY_DELAY) => {
+  try {
+    await rpcRateLimit();
+    return await fn();
+  } catch (error) {
+    if (retries <= 0) throw error;
+    
+    // If rate limited, use the Retry-After header if available
+    let retryAfter = delay;
+    if (error.response && error.response.headers && error.response.headers['retry-after']) {
+      retryAfter = parseInt(error.response.headers['retry-after']) * 1000 || delay;
+    }
+    
+    console.log(`⚠️ RPC call failed, retrying in ${retryAfter}ms... (${retries} attempts left)`);
+    await new Promise(resolve => setTimeout(resolve, retryAfter));
+    return withRetry(fn, retries - 1, Math.min(delay * 2, 10000)); // Max 10s delay
+  }
 };
 
 const retryWithBackoff = async (fn, maxRetries = 3, baseDelay = 1000) => {
@@ -95,60 +117,7 @@ app.get('/api/markets', (req, res) => {
   });
 });
 
-// Wallet endpoints
-app.get('/api/wallet/:address/usdc-balance', async (req, res) => {
-  try {
-    const { address } = req.params;
-    console.log(`💰 Fetching real USDC balance for wallet: ${address}`);
-    
-    // Apply rate limiting before RPC call
-    await rpcRateLimit();
-    
-    // USDC mint address on Solana mainnet
-    const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
-    
-    // Use Syndica RPC for reliable balance fetching
-    const connection = new Connection(SYNDICA_RPC_URL, 'confirmed');
-    const walletPublicKey = new PublicKey(address);
-    
-    console.log('🔍 Searching for USDC token accounts...');
-    
-    // Get all token accounts for this wallet
-    const tokenAccounts = await connection.getTokenAccountsByOwner(walletPublicKey, {
-      mint: USDC_MINT
-    });
-    
-    let usdcBalance = 0;
-    
-    if (tokenAccounts.value.length > 0) {
-      // Get the balance from the first (and usually only) USDC account
-      const accountInfo = await connection.getTokenAccountBalance(tokenAccounts.value[0].pubkey);
-      const rawBalance = accountInfo.value.amount;
-      const decimals = accountInfo.value.decimals;
-      
-      // Convert from raw amount to human readable (USDC has 6 decimals)
-      usdcBalance = parseFloat(rawBalance) / Math.pow(10, decimals);
-      
-      console.log(`✅ Found USDC balance: $${usdcBalance.toFixed(2)}`);
-    } else {
-      console.log('⚠️ No USDC token accounts found for this wallet');
-      usdcBalance = 0;
-    }
-    
-    res.json({
-      success: true,
-      balance: usdcBalance,
-      walletAddress: address,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch USDC balance',
-      message: error.message
-    });
-  }
-});
+// Wallet endpoints are now handled by the improved USDC balance endpoint below
 
 // Real Drift SDK Trade Submission Endpoint
 app.post('/api/trade/submit', async (req, res) => {
@@ -276,58 +245,99 @@ app.post('/api/trade/submit', async (req, res) => {
           throw detailedErr;
         }
         
-        // Create transaction with compute budget
-        const { ComputeBudgetProgram } = require('@solana/web3.js');
-        const transaction = new Transaction();
-
-        // Add compute budget instruction for higher CU limit
-        transaction.add(
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 500000 }),
-          orderIx
+        // Instead of creating and simulating the transaction on the server,
+        // we'll return the instruction and required accounts to the frontend
+        // where the wallet can sign and send the transaction directly
+        console.log('📦 Preparing transaction data for frontend signing...');
+        
+        // Get a fresh blockhash with a longer commitment
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+        
+        // Create a versioned transaction (V0) for better compatibility
+        const { VersionedTransaction, ComputeBudgetProgram } = require('@solana/web3.js');
+        
+        // Add a small delay to ensure the blockhash is fresh
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Check if user has a Drift account and sufficient collateral
+        console.log('🔍 Checking user account status...');
+        const userAccount = await driftClient.getUserAccount();
+        
+        // Prepare instructions array
+        let instructions = [];
+        
+        // Add compute budget instruction
+        instructions.push(ComputeBudgetProgram.setComputeUnitLimit({ units: 500000 }));
+        
+        // If no user account exists, create one
+        if (!userAccount) {
+            console.log('🆕 Creating new user account...');
+            const createAccountIx = await driftClient.getInitializeUserInstructions();
+            instructions = instructions.concat(createAccountIx);
+        }
+        
+        // Add deposit instruction
+        console.log('💰 Depositing collateral...');
+        
+        // Get the user's USDC token account
+        const usdcMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // USDC mint address
+        
+        // Get or create the associated token account
+        const tokenAccounts = await connection.getTokenAccountsByOwner(
+            new PublicKey(walletAddress),
+            { mint: usdcMint }
         );
         
-        // Get recent blockhash and set fee payer
-        console.log('🔗 Getting latest blockhash...');
-        const { blockhash } = await connection.getLatestBlockhash();
-        transaction.recentBlockhash = blockhash;
-        transaction.feePayer = new PublicKey(walletAddress);
-        
-        // Simulate transaction to catch errors early
-        console.log('🔬 Simulating transaction...');
-        const simResult = await connection.simulateTransaction(transaction, { sigVerify: false });
-        if (simResult.value.err) {
-          console.error('❌ Simulation error:', simResult.value.err);
-          if (simResult.value.logs) {
-            console.error('📝 Simulation logs:\n', simResult.value.logs.join('\n'));
-          }
-          const simError = new Error(`Simulation error: ${JSON.stringify(simResult.value.err)}`);
-          simError.simulationLogs = simResult.value.logs || [];
-          throw simError;
+        if (tokenAccounts.value.length === 0) {
+            throw new Error('No USDC token account found. Please deposit USDC to your wallet first.');
         }
-        console.log('✅ Simulation succeeded');
         
-        // Serialize transaction for frontend signing
-        console.log('📦 Serializing transaction for frontend...');
-        const serializedTransaction = transaction.serialize({
-          requireAllSignatures: false,
-          verifySignatures: false
+        const userTokenAccount = tokenAccounts.value[0].pubkey;
+        
+        // Create deposit instruction
+        const depositIx = await driftClient.getDepositInstruction(
+            new BN(tradeAmount * 1e6), // Convert USDC to lamports (6 decimals)
+            0, // Collateral index (0 for USDC)
+            userTokenAccount // User's USDC token account
+        );
+        instructions.push(depositIx);
+        
+        // Add the trade instruction
+        instructions.push(orderIx);
+        
+        // Get the required signers
+        const signers = [];
+        
+        // Serialize instructions for the frontend
+        const serializedInstructions = instructions.map(ix => {
+            // Convert binary data to base64
+            const data = typeof ix.data === 'string' 
+                ? ix.data 
+                : Buffer.from(ix.data).toString('base64');
+                
+            return {
+                programId: ix.programId.toString(),
+                data: data,
+                keys: ix.keys.map(key => ({
+                    pubkey: key.pubkey.toString(),
+                    isSigner: key.isSigner,
+                    isWritable: key.isWritable
+                }))
+            };
         });
         
-        const base64Transaction = serializedTransaction.toString('base64');
-        console.log(`📤 Transaction serialized: ${base64Transaction.length} bytes`);
-        
+        // Return the transaction data to the frontend for signing
         res.json({
           success: true,
-          transaction: base64Transaction,
-          orderParams: {
-            marketIndex: orderParams.marketIndex,
-            direction: direction,
-            baseAssetAmount: finalBaseAssetAmount.toString(),
-            leverage: leverage,
+          transactionData: {
+            instructions: serializedInstructions,
+            blockhash,
+            lastValidBlockHeight,
+            feePayer: walletAddress,
             solPrice: solPrice,
-            solQuantity: solQuantity
+            solQuantity: solAmount.toString()
           },
-          message: `${direction.toUpperCase()} order ready for ${marketSymbol} (${solQuantity.toFixed(4)} SOL @ $${solPrice.toFixed(2)})`
+          message: `${direction.toUpperCase()} order ready for ${marketSymbol} (${solAmount.toFixed(4)} SOL @ $${solPrice.toFixed(2)})`
         });
         
       } finally {
@@ -395,6 +405,93 @@ wss.on('connection', (ws) => {
   });
 });
 
+// USDC Token Mint Address (USDC on Solana mainnet)
+const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+
+// USDC Balance Endpoint
+app.get('/api/wallet/:walletAddress/usdc-balance', async (req, res) => {
+    try {
+        const { walletAddress } = req.params;
+        console.log(`🔍 Fetching USDC balance for wallet: ${walletAddress}`);
+        
+        if (!walletAddress) {
+            console.error('❌ Wallet address is required');
+            return res.status(400).json({ 
+                success: false,
+                error: 'Wallet address is required' 
+            });
+        }
+
+        // Validate wallet address
+        let publicKey;
+        try {
+            publicKey = new PublicKey(walletAddress);
+        } catch (e) {
+            console.error(`❌ Invalid wallet address: ${walletAddress}`, e);
+            return res.status(400).json({ 
+                success: false,
+                error: 'Invalid wallet address format' 
+            });
+        }
+
+        console.log(`🔗 Connecting to Solana RPC: ${CUSTOM_RPC_URL}`);
+        const connection = new Connection(CUSTOM_RPC_URL, 'confirmed');
+        
+        // Test RPC connection
+        try {
+            const slot = await connection.getSlot();
+            console.log(`✅ Connected to Solana RPC. Current slot: ${slot}`);
+        } catch (e) {
+            console.error('❌ Failed to connect to Solana RPC:', e);
+            throw new Error(`Failed to connect to Solana RPC: ${e.message}`);
+        }
+        
+        console.log(`🔍 Fetching token accounts for wallet: ${walletAddress}`);
+        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+            publicKey,
+            { mint: USDC_MINT }
+        );
+
+        console.log(`📊 Found ${tokenAccounts.value.length} USDC token accounts`);
+        
+        // Calculate total USDC balance
+        let usdcBalance = 0;
+        tokenAccounts.value.forEach((account, index) => {
+            try {
+                const amount = account.account.data.parsed.info.tokenAmount.uiAmount;
+                console.log(`  - Account ${index + 1}: ${amount} USDC`);
+                usdcBalance += amount;
+            } catch (e) {
+                console.error(`Error processing token account ${index}:`, e);
+            }
+        });
+
+        console.log(`💰 Total USDC balance for ${walletAddress}: $${usdcBalance.toFixed(2)}`);
+        
+        res.json({
+            success: true,
+            balance: usdcBalance,
+            wallet: walletAddress,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('❌ Error in USDC balance endpoint:', {
+            error: error.message,
+            stack: error.stack,
+            wallet: req.params.walletAddress,
+            timestamp: new Date().toISOString()
+        });
+        
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to fetch USDC balance',
+            wallet: req.params.walletAddress,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
 // Price update broadcasting
 function startPriceUpdates() {
   setInterval(() => {
@@ -449,6 +546,99 @@ function startPriceUpdates() {
     console.log(`📊 Price update sent to ${connectedClients.size} clients`);
   }, 5000); // Update every 5 seconds
 }
+
+// Handle transaction submission from frontend
+app.post('/api/transaction/submit', async (req, res) => {
+    try {
+        const { signedTransaction } = req.body;
+        
+        if (!signedTransaction) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing signed transaction data'
+            });
+        }
+        
+        try {
+            // Convert base64 back to buffer
+            const txBuffer = Buffer.from(signedTransaction, 'base64');
+            
+            // Initialize Drift client with retry mechanism
+            console.log('🔗 Connecting to Solana mainnet via custom RPC with rate limiting...');
+            
+            // Initialize connection with retry
+            const connection = await withRetry(async () => {
+                console.log('🌐 Creating new Solana connection...');
+                const conn = new Connection(CUSTOM_RPC_URL, 'confirmed');
+                // Test the connection
+                await conn.getBlockHeight();
+                return conn;
+            });
+            
+            const wallet = new Wallet(new PublicKey(walletAddress));
+            
+            console.log('🌊 Initializing Drift client with mainnet environment...');
+            const driftClient = await withRetry(async () => {
+                console.log('🔄 Creating new Drift client instance...');
+                const client = new DriftClient({
+                    connection,
+                    wallet,
+                    env: 'mainnet-beta',
+                    opts: {
+                        commitment: 'confirmed',
+                        skipPreflight: false,
+                        preflightCommitment: 'confirmed',
+                        maxRetries: 3,
+                    },
+                });
+                
+                console.log('📦 Subscribing to Drift client...');
+                await client.subscribe();
+                console.log('✅ Drift client subscribed successfully');
+                return client;
+            });
+                
+            // Create a connection to Solana
+            // const connection = new Connection(CUSTOM_RPC_URL, 'confirmed');
+            
+            // Send the transaction
+            console.log('📤 Sending transaction to Solana network...');
+            const signature = await connection.sendRawTransaction(txBuffer, {
+                skipPreflight: false,
+                preflightCommitment: 'confirmed'
+            });
+            
+            console.log('✅ Transaction submitted, signature:', signature);
+            
+            // Wait for confirmation
+            console.log('⏳ Waiting for transaction confirmation...');
+            const confirmation = await connection.confirmTransaction({
+                signature,
+                blockhash: null, // Let the RPC node determine the blockhash
+                lastValidBlockHeight: null
+            }, 'confirmed');
+            
+            console.log('✅ Transaction confirmed:', confirmation);
+            
+            // Return the signature
+            res.json({ success: true, signature });
+        } catch (error) {
+            console.error('❌ Transaction submission failed:', error);
+            res.status(500).json({
+                success: false,
+                error: 'Transaction submission failed',
+                details: error.message
+            });
+        }
+    } catch (error) {
+        console.error('❌ Transaction submission error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            details: error.toString()
+        });
+    }
+});
 
 // Start server
 server.listen(PORT, () => {
