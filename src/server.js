@@ -662,8 +662,128 @@ try {
   }
 });
 
+// Utility function to fetch positions for a wallet (used by WebSocket)
+async function fetchPositionsForWallet(walletAddress) {
+  let driftClient = null;
+  
+  try {
+    // Validate wallet address
+    const isValidWallet = validateWalletAddress(walletAddress);
+    if (!isValidWallet) {
+      throw new Error('Invalid wallet address');
+    }
+    
+    const walletPubkey = new PublicKey(walletAddress);
+    const CLUSTER = process.env.DRIFT_CLUSTER || 'mainnet-beta';
+    
+    // Create connection and DriftClient
+    const connection = await createConnection();
+    driftClient = await createDriftClient(connection, walletPubkey, CLUSTER);
+    
+    // Fetch user accounts
+    const userAccounts = await driftClient.getUserAccountsForAuthority(walletPubkey);
+    
+    if (!userAccounts || userAccounts.length === 0) {
+      return [];
+    }
+    
+    // Find active user account with positions
+    const activeUserAccount = userAccounts.find(account => 
+      account.perpPositions?.some(pos => !pos.baseAssetAmount.isZero())
+    ) || userAccounts[0];
+    
+    if (!activeUserAccount) {
+      return [];
+    }
+    
+    // Process and format positions (reuse logic from API endpoint)
+    const positions = (activeUserAccount.perpPositions || activeUserAccount.positions)
+      .filter(pos => !pos.baseAssetAmount.isZero())
+      .map(pos => {
+        try {
+          // Map market index to market name
+          const getMarketName = (marketIndex) => {
+            switch (marketIndex) {
+              case 0: return 'SOL-PERP';
+              case 1: return 'BTC-PERP';
+              case 2: return 'ETH-PERP';
+              default: return `PERP-${marketIndex}`;
+            }
+          };
+          
+          // Get mark price (current market price) safely
+          let markPrice = 0;
+          try {
+            const oracleData = driftClient.getOracleDataForPerpMarket(pos.marketIndex || 0);
+            markPrice = parseFloat(oracleData.price.toString()) / 1e6; // PRICE_PRECISION is 1e6
+          } catch (e) {
+            console.warn(`Could not fetch mark price for market ${pos.marketIndex}:`, e.message);
+          }
+          
+          // Calculate position size in base asset units (e.g., SOL)
+          const positionSize = Math.abs(parseFloat(pos.baseAssetAmount.toString()) / 1e9); // BASE_PRECISION is 1e9
+          
+          // Calculate average entry price
+          const quoteEntry = pos.quoteEntryAmount ? parseFloat(pos.quoteEntryAmount.toString()) / 1e6 : 0; // QUOTE_PRECISION is 1e6
+          const baseEntry = parseFloat(pos.baseAssetAmount.toString()) / 1e9;
+          const avgEntryPrice = baseEntry !== 0 ? Math.abs(quoteEntry / baseEntry) : 0;
+          
+          // Calculate unrealized PnL
+          const isLong = pos.baseAssetAmount.gt(0);
+          let unrealizedPnl = 0;
+          let pnlPercentage = 0;
+          
+          if (markPrice > 0 && avgEntryPrice > 0) {
+            if (isLong) {
+              unrealizedPnl = (markPrice - avgEntryPrice) * positionSize;
+            } else {
+              unrealizedPnl = (avgEntryPrice - markPrice) * positionSize;
+            }
+            pnlPercentage = (unrealizedPnl / (avgEntryPrice * positionSize)) * 100;
+          }
+          
+          return {
+            market: getMarketName(pos.marketIndex || 0),
+            direction: isLong ? 'long' : 'short',
+            size: positionSize,
+            sizeLabel: `${positionSize.toFixed(4)} SOL`,
+            entryPrice: avgEntryPrice,
+            markPrice: markPrice,
+            currentPrice: markPrice,
+            pnl: unrealizedPnl,
+            pnlPercentage: pnlPercentage,
+            id: (pos.marketIndex || 0).toString(),
+            marketIndex: pos.marketIndex || 0,
+            baseAssetAmount: pos.baseAssetAmount.toString(),
+            quoteAssetAmount: pos.quoteAssetAmount ? pos.quoteAssetAmount.toString() : '0',
+            quoteEntryAmount: pos.quoteEntryAmount ? pos.quoteEntryAmount.toString() : '0'
+          };
+        } catch (error) {
+          console.error('Error processing position:', error.message);
+          return null;
+        }
+      })
+      .filter(pos => pos !== null);
+    
+    return positions;
+    
+  } catch (error) {
+    console.error(`Error fetching positions for wallet ${walletAddress}:`, error.message);
+    return [];
+  } finally {
+    if (driftClient) {
+      try {
+        await driftClient.unsubscribe();
+      } catch (e) {
+        console.error('Error unsubscribing Drift client:', e);
+      }
+    }
+  }
+}
+
 // WebSocket setup
 const connectedClients = new Set();
+const clientWallets = new Map(); // websocket -> wallet address
 
 wss.on('connection', (ws) => {
   console.log('🔗 WebSocket client connected');
@@ -674,8 +794,51 @@ wss.on('connection', (ws) => {
     message: 'Connected to Drift API'
   }));
 
+  // Handle incoming messages
+  ws.on('message', async (message) => {
+    try {
+      const data = JSON.parse(message.toString());
+      console.log('📬 Received WebSocket message:', data);
+      
+      if (data.type === 'set_wallet') {
+        const walletAddress = data.walletAddress;
+        if (walletAddress) {
+          // Validate wallet address
+          const isValidWallet = validateWalletAddress(walletAddress);
+          if (isValidWallet) {
+            clientWallets.set(ws, walletAddress);
+            console.log(`👛 Wallet registered for client: ${walletAddress}`);
+            
+            ws.send(JSON.stringify({
+              type: 'wallet_registered',
+              message: 'Wallet registered for real-time updates'
+            }));
+          } else {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Invalid wallet address'
+            }));
+          }
+        }
+      } else if (data.type === 'clear_wallet') {
+        if (clientWallets.has(ws)) {
+          const wallet = clientWallets.get(ws);
+          clientWallets.delete(ws);
+          console.log(`👛 Wallet cleared for client: ${wallet}`);
+        }
+      }
+    } catch (error) {
+      console.error('Error processing WebSocket message:', error.message);
+    }
+  });
+
   ws.on('close', () => {
     connectedClients.delete(ws);
+    if (clientWallets.has(ws)) {
+      const wallet = clientWallets.get(ws);
+      clientWallets.delete(ws);
+      console.log(`👛 Wallet auto-cleared for disconnected client: ${wallet}`);
+    }
     console.log('🔌 WebSocket client disconnected');
   });
 });
@@ -781,7 +944,7 @@ function startPriceUpdates() {
     }
   ];
   
-  const priceUpdateInterval = setInterval(() => {
+  const priceUpdateInterval = setInterval(async () => {
     if (connectedClients.size === 0) return;
     
     // Generate price updates with improved efficiency
@@ -796,25 +959,61 @@ function startPriceUpdates() {
       openInterest: market.openInterest
     }));
     
-    const message = JSON.stringify({
-      type: 'price_update',
-      data: markets,
-      timestamp: new Date().toISOString()
-    });
-    
-    // More efficient client broadcasting with cleanup
+    // Broadcast to all clients with personalized data
     const activeClients = [];
-    connectedClients.forEach(ws => {
-      if (ws.readyState === ws.OPEN) {
-        activeClients.push(ws);
-        ws.send(message);
-      } else {
-        // Clean up closed connections
-        connectedClients.delete(ws);
-      }
-    });
+    const walletsWithPositions = new Set();
     
-    console.log(`📊 Price update sent to ${activeClients.length} clients`);
+    for (const ws of connectedClients) {
+      if (ws.readyState !== ws.OPEN) {
+        connectedClients.delete(ws);
+        if (clientWallets.has(ws)) {
+          clientWallets.delete(ws);
+        }
+        continue;
+      }
+      
+      activeClients.push(ws);
+      
+      // Check if this client has a registered wallet
+      const walletAddress = clientWallets.get(ws);
+      
+      if (walletAddress && !walletsWithPositions.has(walletAddress)) {
+        // Fetch positions for this wallet (only once per wallet)
+        walletsWithPositions.add(walletAddress);
+        
+        try {
+          const positions = await fetchPositionsForWallet(walletAddress);
+          
+          // Send combined market + position data
+          ws.send(JSON.stringify({
+            type: 'market_and_position_update',
+            markets: markets,
+            positions: positions,
+            walletAddress: walletAddress,
+            timestamp: new Date().toISOString()
+          }));
+          
+        } catch (error) {
+          console.error(`Error fetching positions for ${walletAddress}:`, error.message);
+          // Send just market data if position fetch fails
+          ws.send(JSON.stringify({
+            type: 'price_update',
+            data: markets,
+            timestamp: new Date().toISOString()
+          }));
+        }
+      } else {
+        // Send just market data for clients without registered wallets
+        ws.send(JSON.stringify({
+          type: 'price_update',
+          data: markets,
+          timestamp: new Date().toISOString()
+        }));
+      }
+    }
+    
+    const positionClients = walletsWithPositions.size;
+    console.log(`📊 Updates sent to ${activeClients.length} clients (${positionClients} with positions)`);
   }, 5000); // Update every 5 seconds
   
   // Return interval for potential cleanup

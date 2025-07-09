@@ -216,6 +216,11 @@ class DriftAPIInterface {
                     channel: 'trades',
                     symbol: 'SOL-PERP'
                 }));
+                
+                // Register wallet immediately if connected
+                if (this.config.walletAddress) {
+                    this.registerWalletWithWebSocket();
+                }
             });
             
             // Listen for messages
@@ -252,55 +257,79 @@ class DriftAPIInterface {
             setTimeout(() => this.connectWebSocket(), 5000);
         }
     }
-    
+
     /**
      * Handle incoming WebSocket messages
      * @param {Object} message - The WebSocket message
      */
     handleWebSocketMessage(message) {
-        if (!message || !message.type) return;
+    if (!message || !message.type) return;
+    
+    // Handle different message types
+    if (message.type === 'market_data') {
+        this.displayMarkets(message.data);
+        this.logMessage('success', `✅ Loaded ${message.data.length} markets`);
+    } else if (message.type === 'price_update') {
+        this.displayMarkets(message.data);
+        this.logMessage('info', `🔄 Live prices updated (${message.data.length} markets)`);
         
-        switch (message.type) {
-            case 'price_update': // Backend sends 'price_update'
-            case 'priceUpdate':
-                this.handlePriceUpdate(message.data);
-                break;
-            case 'trade':
-                this.handleTradeUpdate(message.data);
-                break;
-            case 'position':
-                this.handlePositionUpdate(message.data);
-                break;
-            case 'connected':
-                console.log('✅ WebSocket connection established');
-                break;
-            default:
-                console.log('Unhandled WebSocket message type:', message.type);
+        const timestamp = new Date().toLocaleTimeString();
+        this.logMessage('info', `⏰ Last update: ${timestamp}`);
+    } else if (message.type === 'market_and_position_update') {
+        // Handle combined market and position updates
+        this.displayMarkets(message.markets);
+        this.handleWebSocketPositionUpdate(message.positions, message.walletAddress);
+        
+        const timestamp = new Date().toLocaleTimeString();
+        this.logMessage('success', `✨ Markets + Positions updated: ${message.markets.length} markets, ${message.positions.length} positions (${timestamp})`);
+    } else if (message.type === 'position_update') {
+        // Handle position updates from WebSocket (legacy support)
+        this.handleWebSocketPositionUpdate(message.data, message.walletAddress);
+    } else if (message.type === 'connected') {
+        this.logMessage('success', `🟢 ${message.message}`);
+        // Register wallet immediately if one is connected
+        if (this.config.walletAddress) {
+            this.registerWalletWithWebSocket();
+        }
+    } else if (message.type === 'wallet_registered') {
+        this.logMessage('success', `👛 ✅ ${message.message}`);
+        console.log('👛 Wallet successfully registered for real-time updates');
+    } else if (message.type === 'subscribed') {
+        this.logMessage('success', message.message);
+    } else if (message.type === 'unsubscribed') {
+        this.logMessage('info', message.message);
+    } else if (message.type === 'pong') {
+        this.logMessage('info', '🏓 Ping successful');
+    } else if (message.type === 'error') {
+        this.logMessage('error', `❌ WebSocket error: ${message.message}`);
+    } else {
+        // For debugging, show other message types
+        this.logMessage('info', `Received: ${JSON.stringify(message, null, 2)}`);
+    }
+    }
+
+    handlePriceUpdate(markets) {
+    if (!markets || !Array.isArray(markets)) return;
+    
+    // Update the markets data
+    this.markets = markets;
+    
+    // Update the UI with new prices
+    this.displayMarkets(markets);
+    
+    // Update SOL price for trading calculations
+    const solMarket = markets.find(m => m.symbol === 'SOL-PERP');
+    if (solMarket) {
+        this.currentSolPrice = solMarket.price;
+        // Update any price displays in trading interface
+        const priceDisplay = document.getElementById('sol-price-display');
+        if (priceDisplay) {
+            priceDisplay.textContent = `$${solMarket.price.toFixed(2)}`;
         }
     }
     
-    handlePriceUpdate(markets) {
-        if (!markets || !Array.isArray(markets)) return;
-        
-        // Update the markets data
-        this.markets = markets;
-        
-        // Update the UI with new prices
-        this.displayMarkets(markets);
-        
-        // Update SOL price for trading calculations
-        const solMarket = markets.find(m => m.symbol === 'SOL-PERP');
-        if (solMarket) {
-            this.currentSolPrice = solMarket.price;
-            // Update any price displays in trading interface
-            const priceDisplay = document.getElementById('sol-price-display');
-            if (priceDisplay) {
-                priceDisplay.textContent = `$${solMarket.price.toFixed(2)}`;
-            }
-        }
-        
-        console.log('📊 Price update received:', markets.length, 'markets');
-    }
+    console.log('📊 Price update received:', markets.length, 'markets');
+}
     
     handleTradeUpdate(data) {
         console.log('💹 Trade update:', data);
@@ -420,6 +449,7 @@ class DriftAPIInterface {
 
         // WebSocket controls
         document.getElementById('send-ws-btn').addEventListener('click', () => this.sendWebSocketMessage());
+        document.getElementById('test-position-subscription-btn').addEventListener('click', () => this.testPositionSubscription());
         document.getElementById('clear-log-btn').addEventListener('click', () => this.clearLog());
         document.getElementById('ws-message-input').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this.sendWebSocketMessage();
@@ -489,65 +519,7 @@ class DriftAPIInterface {
 
 
 
-    startWebSocket() {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.logMessage('error', 'WebSocket is already connected');
-            return;
-        }
-
-        this.ws = new WebSocket('ws://localhost:3004');
-
-        this.ws.onopen = () => {
-            this.isConnected = true;
-            this.updateConnectionStatus('Connected', 'connected');
-            this.updateNetworkStatus(`${this.config.driftEnv} (${this.config.solanaRpc})`);
-            this.logMessage('success', 'WebSocket connected');
-            
-            document.getElementById('send-ws-btn').disabled = false;
-        };
-
-        this.ws.onmessage = (event) => {
-            const message = JSON.parse(event.data);
-            
-            // Handle different message types
-            if (message.type === 'market_data') {
-                this.displayMarkets(message.data);
-                this.logMessage('success', `✅ Loaded ${message.data.length} markets`);
-            } else if (message.type === 'price_update') {
-                this.displayMarkets(message.data);
-                // Show update message every time for better visibility
-                this.logMessage('info', `🔄 Live prices updated (${message.data.length} markets)`);
-                
-                // Update the timestamp to show when last updated
-                const timestamp = new Date().toLocaleTimeString();
-                this.logMessage('info', `⏰ Last update: ${timestamp}`);
-            } else if (message.type === 'connected') {
-                this.logMessage('success', `🟢 ${message.message}`);
-            } else if (message.type === 'subscribed') {
-                this.logMessage('success', message.message);
-            } else if (message.type === 'unsubscribed') {
-                this.logMessage('info', message.message);
-            } else if (message.type === 'pong') {
-                this.logMessage('info', '🏓 Ping successful');
-            } else {
-                // For debugging, show other message types
-                this.logMessage('info', `Received: ${JSON.stringify(message, null, 2)}`);
-            }
-        };
-
-        this.ws.onclose = () => {
-            this.isConnected = false;
-            this.updateConnectionStatus('Disconnected', 'disconnected');
-            this.updateNetworkStatus('Not Connected');
-            this.logMessage('info', 'WebSocket disconnected');
-            
-            document.getElementById('send-ws-btn').disabled = true;
-        };
-
-        this.ws.onerror = (error) => {
-            this.logMessage('error', `WebSocket error: ${error.message || 'Connection failed'}`);
-        };
-    }
+    // Removed duplicate startWebSocket method - all WebSocket logic consolidated in connectWebSocket()
 
     stopWebSocket() {
         if (this.ws) {
@@ -571,19 +543,33 @@ class DriftAPIInterface {
         }
 
         try {
-            const messageObj = JSON.parse(message);
-            this.ws.send(JSON.stringify(messageObj));
+            this.ws.send(message);
             this.logMessage('info', `Sent: ${message}`);
-            input.value = '';
+            input.value = ''; // Clear input
         } catch (error) {
-            // If it's not JSON, send as a simple message
-            this.ws.send(JSON.stringify({
-                type: 'message',
-                content: message
-            }));
-            this.logMessage('info', `Sent: ${message}`);
-            input.value = '';
+            this.logMessage('error', `Failed to send message: ${error.message}`);
         }
+    }
+
+    testPositionSubscription() {
+        console.log('=== TESTING POSITION SUBSCRIPTION ===');
+        console.log('Wallet address:', this.config.walletAddress);
+        console.log('WebSocket state:', this.ws ? this.ws.readyState : 'null');
+        console.log('WebSocket OPEN constant:', WebSocket.OPEN);
+        
+        if (!this.config.walletAddress) {
+            this.logMessage('error', 'No wallet connected - connect wallet first');
+            return;
+        }
+        
+        if (!this.isConnected) {
+            this.logMessage('error', 'WebSocket not connected');
+            return;
+        }
+        
+        // Force wallet registration attempt
+        this.logMessage('info', 'Forcing wallet registration test...');
+        this.registerWalletWithWebSocket();
     }
 
     clearLog() {
@@ -824,6 +810,17 @@ class DriftAPIInterface {
 
     disconnectWallet() {
         try {
+            // Clear wallet registration from WebSocket first
+            if (this.config.walletAddress) {
+                this.clearWalletFromWebSocket();
+            }
+            
+            // Clear any existing timers
+            if (this.config.positionRefreshTimer) {
+                clearInterval(this.config.positionRefreshTimer);
+                this.config.positionRefreshTimer = null;
+            }
+            
             if (this.wallet) {
                 this.wallet.disconnect();
             }
@@ -836,7 +833,13 @@ class DriftAPIInterface {
             // Update UI
             this.updateWalletUI(null);
             
-            this.logMessage('info', '👛 Wallet disconnected');
+            // Clear positions display
+            const container = document.getElementById('positions-container');
+            if (container) {
+                container.innerHTML = '<div class="no-positions"><p>Connect your wallet to view positions</p></div>';
+            }
+            
+            this.logMessage('info', '👛 Wallet disconnected and position subscription cleared');
             
         } catch (error) {
             console.error('Wallet disconnection error:', error);
@@ -1464,11 +1467,23 @@ this.logMessage('success', `📤 Trade instructions created: ${instructionsLen} 
             .replace(/'/g, '&#39;');
     }
     
-    async refreshPositions() {
+    async refreshPositions(forceRefresh = false) {
         // Prevent concurrent refreshes
         if (this.config.isRefreshingPositions) {
             console.log('Position refresh already in progress, skipping...');
             return;
+        }
+        
+        // Skip API refresh if WebSocket is providing real-time updates (unless forced)
+        if (!forceRefresh && this.ws && this.ws.readyState === WebSocket.OPEN && this.config.walletAddress) {
+            // Check if we have a recent WebSocket position update (within last 15 seconds)
+            const lastUpdate = this.config.lastPositionUpdate || 0;
+            const timeSinceUpdate = Date.now() - lastUpdate;
+            
+            if (timeSinceUpdate < 15000) { // 15 seconds
+                console.log('🚀 Skipping API refresh - WebSocket providing real-time data');
+                return;
+            }
         }
         
         const container = document.getElementById('positions-container');
@@ -1767,36 +1782,124 @@ this.logMessage('success', `📤 Trade instructions created: ${instructionsLen} 
     }
 
     /**
-     * Sets up a periodic refresh of the user's positions
+     * Sets up position updates via WebSocket instead of polling
      * This method is called during app initialization and after wallet connection
      */
     setupPositionRefresh() {
-        // Clear any existing timer to avoid duplicates
+        // Clear any existing timer to avoid duplicates (legacy polling)
         if (this.config.positionRefreshTimer) {
             clearInterval(this.config.positionRefreshTimer);
             this.config.positionRefreshTimer = null;
         }
 
-        // Only set up the timer if we have a connected wallet
+        // Only set up WebSocket subscription if we have a connected wallet
         if (this.config.walletAddress) {
-            // Initial refresh
-            this.refreshPositions().catch(error => {
+            // Do initial refresh
+            this.refreshPositions(true).catch(error => {
                 console.error('Error in initial position refresh:', error);
             });
-
-            // Set up periodic refresh
-            this.config.positionRefreshTimer = setInterval(() => {
-                // Only refresh if not already refreshing
-                if (!this.config.isRefreshingPositions) {
-                    this.refreshPositions().catch(error => {
-                        console.error('Error in periodic position refresh:', error);
-                    });
+            
+            // Subscribe to WebSocket updates with retry logic
+            const attemptSubscription = () => {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.registerWalletWithWebSocket();
+                } else {
+                    console.log('WebSocket not ready, retrying subscription in 1 second...');
+                    setTimeout(attemptSubscription, 1000);
                 }
-            }, this.config.positionRefreshInterval);
-
-            console.log(`✅ Position auto-refresh enabled (every ${this.config.positionRefreshInterval / 1000} seconds)`);
+            };
+            
+            attemptSubscription();
+            
+            console.log(`✅ Position management enabled for ${this.config.walletAddress}`);
         } else {
-            console.log('Position auto-refresh not started: No wallet connected');
+            console.log('Position management not started: No wallet connected');
+        }
+    }
+
+    /**
+     * Register wallet with WebSocket for combined updates
+     */
+    registerWalletWithWebSocket() {
+        if (!this.config.walletAddress) {
+            console.warn('Cannot register wallet: No wallet connected');
+            return;
+        }
+        
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.warn('Cannot register wallet: WebSocket not ready');
+            console.log('WebSocket state:', this.ws ? this.ws.readyState : 'null');
+            return;
+        }
+        
+        const walletMessage = {
+            type: 'set_wallet',
+            walletAddress: this.config.walletAddress
+        };
+        
+        console.log('Registering wallet with WebSocket:', walletMessage);
+        this.ws.send(JSON.stringify(walletMessage));
+        console.log(`👛 Registered wallet for combined updates: ${this.config.walletAddress}`);
+        this.logMessage('info', `👛 Wallet registered for real-time market + position updates`);
+    }
+
+    /**
+     * Clear wallet registration from WebSocket
+     */
+    clearWalletFromWebSocket() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            const clearMessage = {
+                type: 'clear_wallet'
+            };
+            
+            this.ws.send(JSON.stringify(clearMessage));
+            console.log(`👛 Cleared wallet registration from WebSocket`);
+        }
+    }
+
+    /**
+     * Handle position updates received via WebSocket
+     */
+    handleWebSocketPositionUpdate(positions, walletAddress) {
+        try {
+            // Verify this update is for our connected wallet
+            if (walletAddress !== this.config.walletAddress) {
+                console.warn(`Received position update for different wallet: ${walletAddress}`);
+                return;
+            }
+            
+            // Track last update time for optimization
+            this.config.lastPositionUpdate = Date.now();
+            
+            console.log(`🔄 Received WebSocket position update: ${positions.length} positions`);
+            
+            // Update the positions display
+            this.displayPositions(positions);
+            
+            // Log position summary (only for changed positions to reduce spam)
+            if (positions.length > 0) {
+                const summary = positions.map(pos => {
+                    const pnlColor = pos.pnl >= 0 ? '🟢' : '🔴';
+                    return `${pnlColor} ${pos.market} ${pos.direction.toUpperCase()}: ${pos.sizeLabel} @ $${pos.entryPrice.toFixed(2)} | PnL: $${pos.pnl.toFixed(2)} (${pos.pnlPercentage.toFixed(2)}%)`;
+                }).join('\n');
+                console.log('Position Summary:\n' + summary);
+            }
+            
+            // Update UI status (less frequent to reduce log spam)
+            this.logMessage('success', `🔄 Positions updated via WebSocket (${positions.length} active)`);
+            
+            // Dispatch event for other components
+            document.dispatchEvent(new CustomEvent('positions-updated', { 
+                detail: { 
+                    positions: positions,
+                    source: 'websocket',
+                    timestamp: new Date().toISOString()
+                } 
+            }));
+            
+        } catch (error) {
+            console.error('Error handling WebSocket position update:', error);
+            this.logMessage('error', `Error processing position update: ${error.message}`);
         }
     }
 
