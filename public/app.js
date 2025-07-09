@@ -795,9 +795,10 @@ class DriftAPIInterface {
             this.updateTransactionStep('submit', 'active');
             this.showTradeStatus('loading', '⚡ Submitting transaction to Solana blockchain...');
             
+            let signature;
             try {
                 // Submit transaction via backend proxy to avoid 403 errors
-                const signature = await this.submitTransactionViaBackend(signedTransaction);
+                signature = await this.submitTransactionViaBackend(signedTransaction);
             } catch (error) {
                 if (error.message.includes('block height exceeded') || error.message.includes('Blockhash not found')) {
                     // If the blockhash expired, refresh it and try again
@@ -808,10 +809,10 @@ class DriftAPIInterface {
                     
                     // Re-sign the transaction with the new blockhash
                     const reSignedTx = await this.wallet.signTransaction(transaction);
-                    const signature = await this.submitTransactionViaBackend(reSignedTx);
-                    return signature;
+                    signature = await this.submitTransactionViaBackend(reSignedTx);
+                } else {
+                    throw error; // Re-throw if it's a different error
                 }
-                throw error; // Re-throw if it's a different error
             }
             
             this.logMessage('success', `📤 Transaction submitted: ${signature}`);
@@ -1019,15 +1020,31 @@ class DriftAPIInterface {
             
             if (!response.ok) {
                 const errorMsg = result.error || result.message || 'Transaction submission failed';
-                this.logMessage('error', `❌ Backend error: ${errorMsg}`);
+                const details = result.details ? `\nDetails: ${result.details}` : '';
+                this.logMessage('error', `❌ Backend error: ${errorMsg}${details}`);
                 throw new Error(errorMsg);
             }
             
             if (!result.success) {
-                throw new Error(result.message || 'Transaction submission failed');
+                const errorMsg = result.error || result.message || 'Transaction submission failed';
+                this.logMessage('error', `❌ Transaction failed: ${errorMsg}`);
+                throw new Error(errorMsg);
+            }
+            
+            if (!result.signature) {
+                throw new Error('No transaction signature received from backend');
             }
             
             this.logMessage('success', `✅ Transaction submitted successfully: ${result.signature}`);
+            
+            // Log confirmation details if available
+            if (result.confirmation) {
+                this.logMessage('info', `📝 Confirmation status: ${result.confirmation.confirmationStatus || 'unknown'}`);
+                if (result.confirmation.err) {
+                    this.logMessage('warn', `⚠️ Transaction had an error: ${JSON.stringify(result.confirmation.err)}`);
+                }
+            }
+            
             return result.signature;
             
         } catch (error) {
@@ -1038,38 +1055,204 @@ class DriftAPIInterface {
     }
 
     async waitForTransactionConfirmation(signature) {
-        const maxRetries = 90; // 90 seconds
-        for (let i = 0; i < maxRetries; i++) {
-            try {
-                // Check transaction status via backend proxy
-                const response = await fetch(`/api/solana/rpc`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        method: 'getSignatureStatuses',
-                        params: [[signature]]
-                    })
-                });
-                
-                const result = await response.json();
-                if (result && result.result && result.result.value && result.result.value[0]) {
-                    const status = result.result.value[0];
-                    if (status && status.confirmationStatus) {
-                        this.logMessage('success', `✅ Transaction confirmed: ${status.confirmationStatus}`);
-                        return;
-                    }
-                }
-            } catch (error) {
-                this.logMessage('warning', `⚠️ Confirmation check ${i + 1}/${maxRetries} failed: ${error.message}`);
+        const maxRetries = 60; // 60 seconds total
+        const checkInterval = 2000; // Check every 2 seconds
+        const maxAttempts = Math.ceil(maxRetries * 1000 / checkInterval);
+        const startTime = Date.now();
+        
+        this.logMessage('info', `🔍 Waiting for transaction confirmation: ${signature}`);
+        
+        // Array of fun status messages to show while waiting
+        const statusMessages = [
+            'Finalizing your trade...',
+            'Almost there...',
+            'Just a few more seconds...',
+            'Confirming with the network...',
+            'Hang tight! This usually takes a moment...',
+            'Your trade is being processed...',
+            'Getting everything just right...'
+        ];
+        
+        // Get the status container or create it if it doesn't exist
+        let statusContainer = document.getElementById('trade-status-message');
+        if (!statusContainer) {
+            // If the container doesn't exist, create it
+            const container = document.createElement('div');
+            container.id = 'trade-status-message';
+            // Find a good place to insert it - for example, before the first form or after the last form
+            const forms = document.getElementsByTagName('form');
+            if (forms.length > 0) {
+                forms[0].parentNode.insertBefore(container, forms[0].nextSibling);
+            } else {
+                // If no forms found, append to body
+                document.body.appendChild(container);
             }
-            
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            statusContainer = container;
         }
         
-        throw new Error('Transaction confirmation timeout after 30 seconds');
+        // Create loading indicator HTML
+        const loadingHtml = `
+            <div class="transaction-loading">
+                <div class="loading-spinner"></div>
+                <div class="loading-dots">
+                    <div class="loading-dot"></div>
+                    <div class="loading-dot"></div>
+                    <div class="loading-dot"></div>
+                </div>
+                <div class="transaction-status" id="transaction-status">
+                    Submitting transaction to the Solana network...
+                </div>
+                <div class="transaction-explorer-link" style="margin-top: 10px;">
+                    <a href="https://explorer.solana.com/tx/${signature}" target="_blank" style="color: #4CAF50; text-decoration: none;">
+                        View on Solana Explorer ↗
+                    </a>
+                </div>
+            </div>
+        `;
+        
+        // Update the UI with our loading animation
+        statusContainer.innerHTML = loadingHtml;
+        
+        // Initialize status element reference
+        let statusEl = document.getElementById('transaction-status');
+        
+        // Helper function to safely update status
+        const updateStatus = (message, isError = false) => {
+            const statusContent = `
+                <div class="transaction-status" style="color: ${isError ? '#e74c3c' : 'inherit'};">
+                    ${message}
+                </div>
+                <div style="margin-top: 10px;">
+                    <a href="https://explorer.solana.com/tx/${signature}" target="_blank" 
+                       style="color: ${isError ? '#f39c12' : '#4CAF50'}; text-decoration: none;">
+                        View on Solana Explorer ↗
+                    </a>
+                </div>
+            `;
+            
+            if (statusEl) {
+                statusEl.innerHTML = message;
+                statusEl.style.color = isError ? '#e74c3c' : 'inherit';
+                if (isError) {
+                    statusEl.style.fontWeight = 'bold';
+                }
+            } else {
+                // If status element is not found, update the container directly
+                statusContainer.innerHTML = statusContent;
+                // Update the statusEl reference in case it was just created
+                statusEl = document.getElementById('transaction-status');
+            }
+        };
+        
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+            const remainingTime = Math.max(0, maxRetries - elapsedSeconds);
+            
+            // Rotate through status messages
+            const statusIndex = Math.floor(elapsedSeconds / 3) % statusMessages.length;
+            const statusMessage = `${statusMessages[statusIndex]} (${remainingTime}s remaining)`;
+            
+            // Update status
+            updateStatus(statusMessage);
+            
+            try {
+                // Check transaction status via backend proxy
+                const response = await fetch(`/api/transaction/status?signature=${encodeURIComponent(signature)}`);
+                
+                if (!response.ok) {
+                    // Handle 404 specifically for dropped transactions
+                    if (response.status === 404) {
+                        const errorData = await response.json().catch(() => ({}));
+                        if (errorData.dropped) {
+                            throw new Error('Transaction was dropped from the mempool. Please try again.');
+                        }
+                    }
+                    throw new Error(`HTTP ${response.status} - ${response.statusText}`);
+                }
+                
+                const result = await response.json();
+                
+                if (!result.success) {
+                    if (result.dropped) {
+                        throw new Error('Transaction was dropped from the mempool. Please try again.');
+                    }
+                    throw new Error(result.error || 'Failed to get transaction status');
+                }
+                
+                const status = result.status;
+                this.logMessage('info', `📝 Status check ${elapsedSeconds}s: ${status ? status.confirmationStatus : 'pending'}`);
+                
+                // Check if transaction is confirmed
+                if (status && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
+                    const successMessage = `✅ Transaction confirmed in ${elapsedSeconds}s!`;
+                    this.logMessage('success', successMessage);
+                    
+                    // Update UI to show success
+                    updateStatus(successMessage);
+                    
+                    // Add a small delay to show the success message
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    return status;
+                }
+                
+                // If we have an error in the status, throw it
+                if (status && status.err) {
+                    throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
+                }
+                
+            } catch (error) {
+                console.error('Error checking transaction status:', error);
+                
+                // Update UI to show error
+                const errorMessage = `❌ ${error.message}`;
+                updateStatus(errorMessage, true);
+                
+                // If we get a 404 or dropped status, fail fast
+                if (error.message.includes('404') || 
+                    error.message.includes('not found') || 
+                    error.message.includes('dropped')) {
+                    throw new Error(`Transaction failed: ${error.message}`);
+                }
+                
+                this.logMessage('warn', `⚠️ Status check failed: ${error.message}`);
+                
+                // For transient errors, continue waiting
+                if (statusEl) {
+                    statusEl.textContent = `⚠️ ${error.message}. Retrying...`;
+                }
+            }
+            
+            // Wait before next check with a small jitter to avoid thundering herd
+            const jitter = Math.random() * 500 - 250; // ±250ms jitter
+            await new Promise(resolve => setTimeout(resolve, checkInterval + jitter));
+        }
+        
+        // If we get here, we've timed out
+        const errorMsg = `Transaction confirmation timeout after ${maxRetries} seconds. ` +
+                        `The transaction might still be processing.`;
+        
+        this.logMessage('warn', `⏱️ ${errorMsg}`);
+        
+        // Update the UI to show the timeout
+        updateStatus(`⚠️ ${errorMsg}`, true);
+        
+        throw new Error(errorMsg);
+    }
+
+    createTradeParams(tradeAmount, solMarket) {
+        const isLong = this.tradeDirection === 'long';
+        const baseAssetAmount = (tradeAmount * this.currentLeverage) / solMarket.price;
+        
+        return {
+            marketIndex: 0, // SOL-PERP is market index 0 on Drift
+            direction: isLong ? 'long' : 'short',
+            baseAssetAmount: baseAssetAmount,
+            quoteAssetAmount: tradeAmount,
+            leverage: this.currentLeverage,
+            price: solMarket.price
+        };
     }
     
-    // Position Management Methods
     async refreshPositions() {
         if (!this.isWalletConnected) return;
         

@@ -563,10 +563,9 @@ app.post('/api/transaction/submit', async (req, res) => {
             // Convert base64 back to buffer
             const txBuffer = Buffer.from(signedTransaction, 'base64');
             
-            // Initialize Drift client with retry mechanism
-            console.log('🔗 Connecting to Solana mainnet via custom RPC with rate limiting...');
-            
             // Initialize connection with retry
+            console.log('🔗 Connecting to Solana mainnet via custom RPC...');
+            
             const connection = await withRetry(async () => {
                 console.log('🌐 Creating new Solana connection...');
                 const conn = new Connection(CUSTOM_RPC_URL, 'confirmed');
@@ -575,37 +574,12 @@ app.post('/api/transaction/submit', async (req, res) => {
                 return conn;
             });
             
-            const wallet = new Wallet(new PublicKey(walletAddress));
-            
-            console.log('🌊 Initializing Drift client with mainnet environment...');
-            const driftClient = await withRetry(async () => {
-                console.log('🔄 Creating new Drift client instance...');
-                const client = new DriftClient({
-                    connection,
-                    wallet,
-                    env: 'mainnet-beta',
-                    opts: {
-                        commitment: 'confirmed',
-                        skipPreflight: false,
-                        preflightCommitment: 'confirmed',
-                        maxRetries: 3,
-                    },
-                });
-                
-                console.log('📦 Subscribing to Drift client...');
-                await client.subscribe();
-                console.log('✅ Drift client subscribed successfully');
-                return client;
-            });
-                
-            // Create a connection to Solana
-            // const connection = new Connection(CUSTOM_RPC_URL, 'confirmed');
-            
-            // Send the transaction
-            console.log('📤 Sending transaction to Solana network...');
+            // Send the raw transaction directly - no need for Drift client here
+            console.log('📤 Sending raw transaction to Solana network...');
             const signature = await connection.sendRawTransaction(txBuffer, {
                 skipPreflight: false,
-                preflightCommitment: 'confirmed'
+                preflightCommitment: 'confirmed',
+                maxRetries: 3
             });
             
             console.log('✅ Transaction submitted, signature:', signature);
@@ -615,27 +589,112 @@ app.post('/api/transaction/submit', async (req, res) => {
             const confirmation = await connection.confirmTransaction({
                 signature,
                 blockhash: null, // Let the RPC node determine the blockhash
-                lastValidBlockHeight: null
-            }, 'confirmed');
+                commitment: 'confirmed',
+                maxRetries: 3
+            });
             
-            console.log('✅ Transaction confirmed:', confirmation);
+            console.log('🎉 Transaction confirmed:', confirmation);
             
-            // Return the signature
-            res.json({ success: true, signature });
+            return res.json({
+                success: true,
+                signature,
+                confirmation: {
+                    slot: confirmation.context.slot,
+                    confirmations: null,
+                    confirmationStatus: 'confirmed',
+                    err: null
+                }
+            });
+            
         } catch (error) {
-            console.error('❌ Transaction submission failed:', error);
-            res.status(500).json({
+            console.error('❌ Transaction submission error:', error);
+            return res.status(500).json({
                 success: false,
-                error: 'Transaction submission failed',
-                details: error.message
+                error: error.message || 'Failed to submit transaction',
+                details: process.env.NODE_ENV === 'development' ? error.stack : undefined
             });
         }
+        
     } catch (error) {
-        console.error('❌ Transaction submission error:', error);
-        res.status(500).json({
+        console.error('❌ Error in transaction submission handler:', error);
+        return res.status(500).json({
             success: false,
-            error: error.message,
-            details: error.toString()
+            error: 'Internal server error',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+});
+
+// Add transaction status endpoint
+app.get('/api/transaction/status', async (req, res) => {
+    try {
+        const { signature } = req.query;
+        
+        if (!signature) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing transaction signature parameter'
+            });
+        }
+        
+        // Initialize connection with retry
+        const connection = await withRetry(async () => {
+            console.log('🌐 Creating new Solana connection for status check...');
+            const conn = new Connection(CUSTOM_RPC_URL, 'confirmed');
+            // Test the connection
+            await conn.getSlot();
+            return conn;
+        });
+        
+        // First try to get the signature status
+        const status = await connection.getSignatureStatus(signature, {
+            searchTransactionHistory: true
+        });
+        
+        console.log(`📝 Status for ${signature}:`, status ? 'Found' : 'Not found');
+        
+        // If we have a status, return it
+        if (status && status.value) {
+            return res.json({
+                success: true,
+                signature,
+                status: status.value
+            });
+        }
+        
+        // If not found, check if it was dropped from the mempool
+        try {
+            // This will throw if the transaction is not found in the mempool
+            await connection.getSignatureStatus(signature);
+        } catch (error) {
+            if (error.message.includes('not found') || error.message.includes('unknown')) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'Transaction not found in mempool or confirmed blocks',
+                    dropped: true
+                });
+            }
+            throw error; // Re-throw other errors
+        }
+        
+        // If we get here, the transaction is still in the mempool
+        return res.json({
+            success: true,
+            signature,
+            status: {
+                confirmationStatus: 'pending',
+                confirmations: null,
+                slot: null,
+                err: null
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Error checking transaction status:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Failed to check transaction status',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 });
