@@ -436,7 +436,7 @@ class DriftAPIInterface {
             // Wait a moment, then start WebSocket
             setTimeout(() => {
                 this.logMessage('info', '🔌 Connecting to live price stream...');
-                this.startWebSocket();
+                this.connectWebSocket();
             }, 500);
         } catch (error) {
             this.logMessage('error', `❌ Auto-initialization failed: ${error.message}`);
@@ -1021,10 +1021,72 @@ class DriftAPIInterface {
         }
     }
 
+    async calculateMarginRequirements(tradeAmount, leverage, direction) {
+        try {
+            console.log('📊 Making margin calculation request:', {
+                walletAddress: this.config.walletAddress,
+                tradeAmount: tradeAmount,
+                leverage: leverage,
+                direction: direction
+            });
+            
+            const response = await fetch('/api/trade/calculate-margin', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    walletAddress: this.config.walletAddress,
+                    tradeAmount: tradeAmount,
+                    leverage: leverage,
+                    direction: direction,
+                    marketSymbol: 'SOL-PERP'
+                })
+            });
+            
+            console.log('📊 Response status:', response.status);
+            const result = await response.json();
+            console.log('📊 Response data:', result);
+            
+            if (!result.success) {
+                console.log('📊 Error in response:', result.error);
+                throw new Error(result.error || 'Margin calculation failed');
+            }
+            
+            return result;
+        } catch (error) {
+            console.error('Error calculating margin requirements:', error);
+            throw error;
+        }
+    }
+
     async executeIsolatedMarginTrade(tradeAmount) {
         try {
-            // Step 1: Validate and prepare trade
+            // Step 1: Calculate margin requirements
             this.updateTransactionStep('prepare', 'active');
+            this.showTradeStatus('loading', 'Calculating margin requirements...');
+            
+            const marginCalc = await this.calculateMarginRequirements(
+                tradeAmount, 
+                this.currentLeverage, 
+                this.tradeDirection
+            );
+            
+            // Display margin calculation results
+            this.logMessage('info', `📊 Margin Analysis:`);
+            this.logMessage('info', `  - Position Size: $${marginCalc.positionSize}`);
+            this.logMessage('info', `  - Actual Leverage: ${marginCalc.actualLeverage}x`);
+            this.logMessage('info', `  - Margin Required: $${marginCalc.marginRequired}`);
+            this.logMessage('info', `  - Current Collateral: $${marginCalc.currentCollateral}`);
+            this.logMessage('info', `  - SOL Quantity: ${marginCalc.solQuantity}`);
+            
+            if (marginCalc.limitedByMargin) {
+                this.logMessage('warning', `⚠️ Position limited by available margin`);
+            }
+            
+            if (!marginCalc.canExecuteTrade) {
+                throw new Error('Insufficient margin for this trade. Please reduce position size or add more collateral.');
+            }
+            
+            // Step 2: Validate and prepare trade
             this.showTradeStatus('loading', 'Preparing trade...');
             
             // Ensure markets are loaded

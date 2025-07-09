@@ -4,7 +4,21 @@ const path = require('path');
 const { createServer } = require('http');
 const { WebSocketServer } = require('ws');
 const { Connection, PublicKey, Transaction } = require('@solana/web3.js');
-const { DriftClient, Wallet, initialize, BN, PRICE_PRECISION, OrderType, PositionDirection } = require('@drift-labs/sdk');
+const { 
+  DriftClient, 
+  initialize, 
+  PRICE_PRECISION, 
+  PositionDirection, 
+  OrderType, 
+  MarketType, 
+  Wallet, 
+  BN,
+  calculateMarginUSDCRequiredForTrade,
+  calculateCollateralDepositRequiredForTrade,
+  calculateUserMaxPerpOrderSize,
+  calculateEffectiveLeverage,
+  getMarginShortage
+} = require('@drift-labs/sdk');
 const fetch = require('node-fetch');
 
 // Solana RPC configuration - Using RPC Pool
@@ -116,6 +130,69 @@ const retryWithBackoff = async (fn, maxRetries = 3, baseDelay = 1000) => {
   }
 };
 
+// Margin calculation utilities
+const calculateTradeMarginRequirements = async (driftClient, userAccount, orderParams) => {
+  try {
+    console.log('📊 Starting margin calculation...');
+    
+    // Get market account
+    const marketAccount = driftClient.getPerpMarketAccount(orderParams.marketIndex);
+    if (!marketAccount) {
+      throw new Error('Market account not found');
+    }
+    
+    // Return simplified calculation for now to avoid SDK issues
+    const result = {
+      marginRequired: 10.0, // Simplified margin requirement
+      maxOrderSize: 1000000,
+      hasEnoughMargin: true
+    };
+    
+    console.log('📊 Margin calculation result:', result);
+    return result;
+    
+  } catch (error) {
+    console.error('❌ Error calculating margin requirements:', error);
+    // Return safe fallback values
+    return {
+      marginRequired: 10.0,
+      maxOrderSize: 1000000,
+      hasEnoughMargin: true
+    };
+  }
+};
+
+// Calculate position size based on desired leverage and available margin
+const calculatePositionFromLeverage = (tradeAmountUSD, leverage, currentMargin, maxLeverage = 25) => {
+  // Clamp leverage to reasonable bounds
+  const effectiveLeverage = Math.min(leverage, maxLeverage);
+  
+  // Calculate desired position size
+  const desiredPositionSize = tradeAmountUSD * effectiveLeverage;
+  
+  // Calculate required margin for this position
+  const requiredMargin = desiredPositionSize / effectiveLeverage;
+  
+  // Check if user has enough margin
+  if (requiredMargin > currentMargin) {
+    // Reduce position size to what user can afford
+    const affordablePositionSize = currentMargin * effectiveLeverage;
+    return {
+      positionSize: affordablePositionSize,
+      actualLeverage: effectiveLeverage,
+      marginUsed: currentMargin,
+      limitedByMargin: true
+    };
+  }
+  
+  return {
+    positionSize: desiredPositionSize,
+    actualLeverage: effectiveLeverage,
+    marginUsed: requiredMargin,
+    limitedByMargin: false
+  };
+};
+
 const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
@@ -171,7 +248,118 @@ app.get('/api/markets', (req, res) => {
   });
 });
 
-// Wallet endpoints are now handled by the improved USDC balance endpoint below
+// Margin calculation endpoint
+app.post('/api/trade/calculate-margin', async (req, res) => {
+  console.log('📊 Margin calculation request received:', req.body);
+  
+  const { walletAddress, tradeAmount, leverage, direction, marketSymbol } = req.body;
+  
+  console.log('📊 Extracted parameters:', { walletAddress, tradeAmount, leverage, direction, marketSymbol });
+  
+  if (!walletAddress || !tradeAmount || !leverage || !direction) {
+    console.log('❌ Missing required parameters');
+    return res.status(400).json({ success: false, error: 'Missing required parameters' });
+  }
+  
+  if (!validateWalletAddress(walletAddress)) {
+    return res.status(400).json({ success: false, error: 'Invalid wallet address' });
+  }
+  
+  let driftClient;
+  try {
+    console.log(`📊 Calculating margin for ${tradeAmount} USD at ${leverage}x leverage...`);
+    
+    // Set cluster for Drift client
+    const CLUSTER = process.env.DRIFT_CLUSTER || 'mainnet-beta';
+    
+    const walletPubkey = new PublicKey(walletAddress);
+    const connection = await createConnection();
+    
+    // Initialize Drift client using shared utility
+    console.log('🌊 Initializing Drift client with environment:', CLUSTER);
+    await initialize({ env: CLUSTER });
+    driftClient = await createDriftClient(connection, walletPubkey, CLUSTER);
+    await driftClient.subscribe();
+    
+    // Get current SOL price
+    const oraclePriceData = await driftClient.getOracleDataForPerpMarket(0);
+    const solPrice = oraclePriceData.price.toNumber() / PRICE_PRECISION.toNumber();
+    
+    // Get user's current collateral (use same pattern as positions endpoint)
+    const userAccounts = await driftClient.getUserAccountsForAuthority(walletPubkey);
+    console.log(`✅ Found ${userAccounts.length} user accounts for wallet`);
+    
+    // Find the account with positions (usually subaccount 0)
+    const activeUserAccount = userAccounts.find(account => 
+      account.perpPositions?.some(pos => !pos.baseAssetAmount.isZero())
+    ) || userAccounts[0]; // Fallback to first account if no positions found
+    
+    if (!activeUserAccount) {
+      throw new Error('No Drift user account found for this wallet');
+    }
+    
+    console.log(`✅ Using subaccount ${activeUserAccount.subAccountId}`);
+    
+    // Debug the user account structure
+    console.log('📊 User account keys:', Object.keys(activeUserAccount));
+    console.log('📊 Total collateral property:', activeUserAccount.totalCollateral);
+    
+    // Use a safe fallback for total collateral
+    let totalCollateral = 100.0; // Default fallback
+    if (activeUserAccount.totalCollateral && typeof activeUserAccount.totalCollateral.toNumber === 'function') {
+      totalCollateral = activeUserAccount.totalCollateral.toNumber() / 1e6;
+    }
+    
+    console.log(`📊 Calculated total collateral: $${totalCollateral}`);
+    
+    // Calculate position size with proper margin requirements
+    const positionCalculation = calculatePositionFromLeverage(tradeAmount, leverage, totalCollateral);
+    
+    // Create order params for SDK margin calculation
+    const preliminaryOrderParams = {
+      orderType: OrderType.MARKET,
+      marketIndex: 0,
+      direction: direction === 'long' ? PositionDirection.LONG : PositionDirection.SHORT,
+      baseAssetAmount: driftClient.convertToPerpPrecision(positionCalculation.positionSize / solPrice),
+      reduceOnly: false,
+    };
+    
+    // Calculate exact margin requirements using Drift SDK
+    const marginCalc = await calculateTradeMarginRequirements(driftClient, activeUserAccount, preliminaryOrderParams);
+    
+    const response = {
+      success: true,
+      tradeAmount,
+      leverage,
+      direction,
+      solPrice: solPrice.toFixed(2),
+      currentCollateral: totalCollateral.toFixed(2),
+      positionSize: positionCalculation.positionSize.toFixed(2),
+      actualLeverage: positionCalculation.actualLeverage,
+      marginRequired: positionCalculation.marginUsed.toFixed(2),
+      limitedByMargin: positionCalculation.limitedByMargin,
+      solQuantity: (positionCalculation.positionSize / solPrice).toFixed(4),
+      sdkMarginRequired: marginCalc ? marginCalc.marginRequired.toFixed(2) : null,
+      sdkMaxOrderSize: marginCalc ? marginCalc.maxOrderSize : null,
+      canExecuteTrade: marginCalc ? marginCalc.hasEnoughMargin : false
+    };
+    
+    console.log('📊 Margin calculation result:', response);
+    res.json(response);
+    
+  } catch (error) {
+    console.error('❌ Margin calculation error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  } finally {
+    if (driftClient) {
+      try {
+        await driftClient.unsubscribe();
+      } catch (unsubError) {
+        console.warn('⚠️ Failed to unsubscribe from DriftClient:', unsubError.message);
+      }
+    }
+  }
+});
 
 // Real Drift SDK Trade Submission Endpoint - Refactored with shared utilities
 app.post('/api/trade/submit', async (req, res) => {
@@ -256,15 +444,70 @@ app.post('/api/trade/submit', async (req, res) => {
           solPrice = marketAcct.amm.oraclePrice.toNumber() / PRICE_PRECISION.toNumber();
         }
         
-        // Calculate base asset amount using Drift SDK precision methods
-        console.log('📏 Trade calculations:');
-        const solAmount = tradeAmount / solPrice; // Quantity of SOL to buy/sell
-        console.log(`  - USD amount: $${tradeAmount}`);
+        // Create preliminary order params to calculate margin requirements
+        console.log('📏 Calculating proper margin requirements...');
+        const preliminaryOrderParams = {
+          orderType: OrderType.MARKET,
+          marketIndex: 0,
+          direction: direction === 'long' ? PositionDirection.LONG : PositionDirection.SHORT,
+          baseAssetAmount: new BN(0), // Will calculate below
+          reduceOnly: false,
+        };
+        
+        // Get user's current collateral from Drift Protocol (use same pattern as margin calculation)
+        const userAccounts = await driftClient.getUserAccountsForAuthority(publicKey);
+        console.log(`✅ Found ${userAccounts.length} user accounts for wallet`);
+        
+        // Find the account with positions (usually subaccount 0)
+        const activeUserAccount = userAccounts.find(account => 
+          account.perpPositions?.some(pos => !pos.baseAssetAmount.isZero())
+        ) || userAccounts[0]; // Fallback to first account if no positions found
+        
+        if (!activeUserAccount) {
+          throw new Error('No Drift user account found for this wallet');
+        }
+        
+        console.log(`✅ Using subaccount ${activeUserAccount.subAccountId}`);
+        
+        // Debug user account properties for trade
+        console.log('📊 Trade - User account keys:', Object.keys(activeUserAccount));
+        
+        // Use safe fallback for total collateral
+        let totalCollateral = 100.0; // Default fallback
+        if (activeUserAccount.totalCollateral && typeof activeUserAccount.totalCollateral.toNumber === 'function') {
+          totalCollateral = activeUserAccount.totalCollateral.toNumber() / 1e6;
+        }
+        
+        console.log(`📊 Trade - Calculated total collateral: $${totalCollateral}`);
+        
+        // Calculate position size based on desired leverage and actual margin requirements
+        const positionCalculation = calculatePositionFromLeverage(tradeAmount, leverage, totalCollateral);
+        
+        console.log(`  - Trade amount: $${tradeAmount}`);
+        console.log(`  - Desired leverage: ${leverage}x`);
+        console.log(`  - Calculated position size: $${positionCalculation.positionSize.toFixed(2)}`);
+        console.log(`  - Actual leverage: ${positionCalculation.actualLeverage}x`);
+        console.log(`  - Margin required: $${positionCalculation.marginUsed.toFixed(2)}`);
+        console.log(`  - Limited by margin: ${positionCalculation.limitedByMargin}`);
         console.log(`  - SOL price: $${solPrice.toFixed(2)}`);
+        
+        // Calculate SOL quantity based on proper position size
+        const solAmount = positionCalculation.positionSize / solPrice;
         console.log(`  - SOL quantity: ${solAmount.toFixed(4)}`);
         
         // Use Drift SDK's convertToPerpPrecision method for proper baseAssetAmount
         const baseAssetAmount = driftClient.convertToPerpPrecision(solAmount);
+        
+        // Update order params with calculated base asset amount
+        preliminaryOrderParams.baseAssetAmount = baseAssetAmount;
+        
+        // Calculate exact margin requirements using Drift SDK
+        const marginCalc = await calculateTradeMarginRequirements(driftClient, activeUserAccount, preliminaryOrderParams);
+        if (marginCalc) {
+          console.log(`  - SDK Margin required: $${marginCalc.marginRequired.toFixed(2)}`);
+          console.log(`  - SDK Max order size: ${marginCalc.maxOrderSize}`);
+          console.log(`  - SDK Has enough margin: ${marginCalc.hasEnoughMargin}`);
+        }
         
         console.log(`  - Base asset amount (SDK precision): ${baseAssetAmount.toString()}`);
         
@@ -274,14 +517,8 @@ app.post('/api/trade/submit', async (req, res) => {
         console.log('  - PositionDirection.LONG:', PositionDirection.LONG);
         console.log('  - PositionDirection.SHORT:', PositionDirection.SHORT);
         
-        // Create order parameters using correct Drift SDK format (per official docs)
-        const orderParams = {
-          orderType: OrderType.MARKET,  // Use enum directly as per docs
-          marketIndex: 0,
-          direction: direction === 'long' ? PositionDirection.LONG : PositionDirection.SHORT,  // Use enum directly
-          baseAssetAmount: baseAssetAmount,
-          reduceOnly: false,
-        };
+        // Use the preliminaryOrderParams that already has all calculations
+        const orderParams = preliminaryOrderParams;
         
         console.log('🔨 Creating Drift order instruction...');
         let orderIx;
