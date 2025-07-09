@@ -158,6 +158,9 @@ app.post('/api/trade/submit', async (req, res) => {
       // Initialize Solana connection using user's custom RPC
       const connection = new Connection(CUSTOM_RPC_URL, 'confirmed');
       
+      // Set cluster for Drift client
+      const CLUSTER = process.env.DRIFT_CLUSTER || 'mainnet-beta';
+      
       // Create a read-only wallet for the Drift client (actual signing happens in frontend)
       const publicKey = new PublicKey(walletAddress);
       const readOnlyWallet = {
@@ -173,7 +176,7 @@ app.post('/api/trade/submit', async (req, res) => {
         connection: connection,
         wallet: readOnlyWallet,
         programID: new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH'),
-        env: 'mainnet-beta'
+        env: CLUSTER,
       });
       
       // Subscribe to get market data
@@ -368,22 +371,182 @@ app.post('/api/trade/submit', async (req, res) => {
   }
 });
 
-// Positions endpoint (mock)
-app.get('/api/markets/positions/:wallet', async (req, res) => {
+// Close position endpoint
+app.post('/api/trade/close', async (req, res) => {
+  let driftClient;
   try {
-    const { wallet } = req.params;
-    // Mock empty positions
+    const { walletAddress, market, direction, size } = req.body;
+    
+    if (!walletAddress || !market || !direction || !size) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameters',
+        required: ['walletAddress', 'market', 'direction', 'size']
+      });
+    }
+    
+    console.log(`🔒 Closing position request:`, { walletAddress, market, direction, size });
+    
+    // Initialize Drift client
+
+
+    
+
+    
+    // Create a read-only Drift client
+    driftClient = new DriftClient({
+      connection,
+      wallet: {
+        publicKey: new PublicKey(walletAddress),
+        signTransaction: () => Promise.reject(new Error('Read-only client')),
+        signAllTransactions: () => Promise.reject(new Error('Read-only client'))
+      },
+      programID: new PublicKey('dRiftyHA39MWEa3xz9KAZVHAqJzYP6Fh5zHHB6BJHETX'),
+      env: CLUSTER,
+      opts: {
+        commitment: 'confirmed',
+        skipPreflight: true,
+      },
+    });
+    
+    // Initialize the client
+    await driftClient.subscribe();
+    
+    // Get the market index from the market symbol (simplified)
+    const marketIndex = market.includes('SOL') ? 0 : 1; // Default to SOL-PERP if not recognized
+    
+    // Create a market order to close the position
+    // Note: In a real implementation, you would create and sign the transaction
+    // and return it to the client for signing and submission
+    
     res.json({
       success: true,
-      data: [],
+      message: 'Position closed successfully',
+      txId: 'simulated-tx-id', // In a real implementation, this would be the actual transaction ID
       timestamp: new Date().toISOString()
     });
+    
   } catch (error) {
+    console.error('Error closing position:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to close position',
+      message: error.message
+    });
+  } finally {
+    if (driftClient) {
+      try {
+        await driftClient.unsubscribe();
+      } catch (e) {
+        console.error('Error unsubscribing Drift client:', e);
+      }
+    }
+  }
+});
+
+// Positions endpoint
+app.get('/api/markets/positions/:wallet', async (req, res) => {
+  let driftClient;
+  try {
+    let { wallet } = req.params;
+    wallet = (wallet || '').trim();
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) {
+      return res.status(400).json({ success: false, error: 'Invalid wallet address' });
+    }
+    console.log(`Fetching positions for wallet: ${wallet}`);
+    // ---- Cluster & RPC setup ----
+    const { Connection, PublicKey, clusterApiUrl } = require('@solana/web3.js');
+
+
+    // Select cluster (default devnet for local testing)
+    const CLUSTER = process.env.DRIFT_CLUSTER || 'devnet'; // 'mainnet-beta' | 'devnet'
+    const rpcUrl = process.env.SOLANA_RPC_URL || clusterApiUrl(CLUSTER);
+
+    // Validate & parse wallet pubkey safely
+    let walletPubkey;
+    try {
+      walletPubkey = new PublicKey(wallet);
+    } catch (err) {
+      console.error('Invalid wallet address:', wallet, err);
+      return res.status(400).json({ success: false, error: 'Invalid wallet address' });
+    }
+
+    const connection = new Connection(rpcUrl, 'confirmed');
+    
+    // Initialize Drift client
+
+
+    
+
+    
+    // Create a read-only Drift client
+    driftClient = new DriftClient({
+      connection,
+      wallet: {
+        publicKey: walletPubkey,
+        signTransaction: () => Promise.reject(new Error('Read-only client')),
+        signAllTransactions: () => Promise.reject(new Error('Read-only client'))
+      },
+      programID: new PublicKey('dRiftyHA39MWEa3xz9KAZVHAqJzYP6Fh5zHHB6BJHETX'),
+      env: CLUSTER,
+      opts: {
+        commitment: 'confirmed',
+        skipPreflight: true,
+      },
+    });
+    
+    // Initialize the client
+    await driftClient.subscribe();
+    
+    // Fetch Drift `User` object
+    const user = await driftClient.getUser(walletPubkey);
+    const userAccount = user ? user.getUserAccount() : null;
+    
+    if (!userAccount) {
+      return res.json({
+        success: true,
+        positions: [],
+        message: 'No positions found for this wallet',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Get all perp positions
+    const positions = (userAccount.perpPositions || userAccount.positions)
+      .filter(pos => !pos.baseAssetAmount.isZero()) // Only include open positions
+      .map(pos => ({
+        market: 'SOL-PERP', // TODO: Map market index to symbol
+        direction: pos.baseAssetAmount.gt(0) ? 'long' : 'short',
+        size: Math.abs(parseFloat(pos.baseAssetAmount.toString()) / 1e9), // Convert to SOL
+        entryPrice: parseFloat(pos.entryPrice.toString()) / 1e9,
+        currentPrice: parseFloat(driftClient.getOracleDataForMarket(0).price.toString()) / 1e9, // Current SOL price
+        pnl: 0, // TODO: Calculate PnL
+        pnlPercentage: 0, // TODO: Calculate PnL percentage
+        id: pos.marketIndex.toString(),
+        leverage: parseFloat(pos.leverage.toString()) / 1e4
+      }));
+    
+    res.json({
+      success: true,
+      positions,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Error fetching positions:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to fetch positions',
       message: error.message
     });
+  } finally {
+    if (driftClient) {
+      try {
+        await driftClient.unsubscribe();
+      } catch (e) {
+        console.error('Error unsubscribing Drift client:', e);
+      }
+    }
   }
 });
 

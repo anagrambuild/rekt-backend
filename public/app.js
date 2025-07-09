@@ -35,7 +35,17 @@ class DriftAPIInterface {
             // Drift Protocol configuration
             driftProgramId: 'dRiftyHA39MWEa3pc9prcb94Ym6ZoTKp357Dq4QBSgHX',
             driftStateAccount: 'Dd4vYjKj3tFkZ3fM4Rxqk6SJToZ9TvLtqYG8j5RfQ2hx',
-            wsEndpoint: window.location.hostname === 'localhost' ? 'ws://localhost:3004' : 'wss://your-production-url.com'
+            wsEndpoint: window.location.hostname === 'localhost' ? 'ws://localhost:3004' : 'wss://your-production-url.com',
+            walletAddress: null,
+            connection: null,
+            driftClient: null,
+            ws: null,
+            currentLeverage: 5, // Default leverage
+            currentDirection: 'long', // Default direction
+            refreshInterval: null,
+            positionRefreshInterval: 30000, // 30 seconds
+            positionRefreshTimer: null, // For tracking the position refresh interval
+            isRefreshingPositions: false // To prevent concurrent refreshes
         };
         
         // Initialize markets array
@@ -45,21 +55,264 @@ class DriftAPIInterface {
         this.wallet = null;
         this.isWalletConnected = false;
         this.usdcBalance = 0;
-        this.currentLeverage = 1;
-        this.tradeDirection = 'long'; // 'long' or 'short'
         this.currentSolPrice = 0;
+        
+        // Initialize trading direction (fix for toUpperCase error)
+        this.tradeDirection = this.config.currentDirection || 'long';
+        // Initialize leverage value to ensure it's defined before any trade submissions
+        this.currentLeverage = this.config.currentLeverage || 1;
         
         this.initializeApp();
     }
 
     initializeApp() {
-        this.updateConnectionStatus('Disconnected', 'disconnected');
-        this.updateNetworkStatus('Not Connected');
         this.setupEventListeners();
-        this.loadConfiguration();
+        this.initializeWallet();
+        this.initializeMarkets();
+        this.initializeTradingInterface();
+        this.setupPositionRefresh();
         
-        // Automatically fetch markets and start WebSocket on page load
+        // Auto-start market data and WebSocket for live updates
         this.autoInitialize();
+        
+        console.log('✅ DriftAPIInterface initialized');
+    }
+    
+    /**
+     * Initialize wallet connection state and UI
+     */
+    initializeWallet() {
+        // Check if we're in a browser environment
+        if (typeof window === 'undefined') {
+            return;
+        }
+        
+        // Try to auto-connect to Phantom wallet if available
+        if (window.solana?.isPhantom) {
+            this.logMessage('info', '👛 Phantom wallet detected');
+            // Auto-connect if previously connected
+            if (window.solana.isConnected) {
+                this.connectWallet().catch(error => {
+                    console.error('Error during auto-connect:', error);
+                });
+            }
+        } else {
+            this.logMessage('warn', 'Phantom wallet not detected');
+        }
+        
+        // Initialize wallet UI in disconnected state
+        this.updateWalletUI(null);
+    }
+    
+    /**
+     * Initialize markets data and UI
+     */
+    initializeMarkets() {
+        // Initialize markets array if not already done
+        if (!this.markets || !Array.isArray(this.markets)) {
+            this.markets = [];
+        }
+        
+        // Initial fetch of markets data
+        this.fetchMarkets().catch(error => {
+            console.error('Error initializing markets:', error);
+            this.logMessage('error', 'Failed to load markets data');
+            
+            // Show placeholder markets if the fetch fails
+            this.displayMarkets([
+                {
+                    symbol: 'SOL-PERP',
+                    price: 0,
+                    change24h: 0,
+                    volume24h: 0,
+                    high24h: 0,
+                    low24h: 0,
+                    fundingRate: 0,
+                    openInterest: 0
+                }
+            ]);
+        });
+        
+        // Set up periodic refresh of markets data
+        if (this.marketRefreshInterval) {
+            clearInterval(this.marketRefreshInterval);
+        }
+        
+        // Refresh markets every 30 seconds
+        this.marketRefreshInterval = setInterval(() => {
+            this.fetchMarkets().catch(error => {
+                console.error('Error refreshing markets:', error);
+            });
+        }, 30000);
+    }
+    
+    /**
+     * Initialize the trading interface elements and event listeners
+     */
+    initializeTradingInterface() {
+        // Initialize trade amount input
+        const amountInput = document.getElementById('trade-amount');
+        if (amountInput) {
+            amountInput.addEventListener('input', () => this.updateTradeSummary());
+        }
+        
+        // Initialize leverage slider
+        const leverageSlider = document.getElementById('leverage-slider');
+        const leverageValue = document.getElementById('leverage-value');
+        if (leverageSlider && leverageValue) {
+            leverageSlider.addEventListener('input', (e) => {
+                const value = e.target.value;
+                leverageValue.textContent = `${value}x`;
+                this.updateLeverage(parseInt(value, 10));
+                this.updateTradeSummary();
+            });
+        }
+        
+        // Initialize direction buttons
+        const longBtn = document.getElementById('direction-long');
+        const shortBtn = document.getElementById('direction-short');
+        if (longBtn && shortBtn) {
+            longBtn.addEventListener('click', () => this.setTradeDirection('long'));
+            shortBtn.addEventListener('click', () => this.setTradeDirection('short'));
+        }
+        
+        // Initialize trade button
+        const tradeButton = document.getElementById('place-trade');
+        if (tradeButton) {
+            tradeButton.addEventListener('click', () => this.submitTrade());
+        }
+        
+        // Initialize refresh button
+        const refreshBtn = document.getElementById('refresh-positions');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => this.refreshPositions());
+        }
+        
+        console.log('✅ Trading interface initialized');
+    }
+    
+    /**
+     * Connect to WebSocket server for real-time updates
+     */
+    connectWebSocket() {
+        try {
+            // Close existing connection if any
+            if (this.ws) {
+                this.ws.close();
+            }
+            
+            // Create new WebSocket connection
+            this.ws = new WebSocket(this.config.wsEndpoint);
+            
+            // Connection opened
+            this.ws.addEventListener('open', () => {
+                console.log('✅ Connected to WebSocket server');
+                this.isConnected = true;
+                this.updateConnectionStatus('Connected', 'success');
+                
+                // Subscribe to updates
+                this.ws.send(JSON.stringify({
+                    type: 'subscribe',
+                    channel: 'trades',
+                    symbol: 'SOL-PERP'
+                }));
+            });
+            
+            // Listen for messages
+            this.ws.addEventListener('message', (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    this.handleWebSocketMessage(data);
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                }
+            });
+            
+            // Handle connection close
+            this.ws.addEventListener('close', () => {
+                console.log('❌ Disconnected from WebSocket server');
+                this.isConnected = false;
+                this.updateConnectionStatus('Disconnected', 'error');
+                
+                // Attempt to reconnect after a delay
+                setTimeout(() => this.connectWebSocket(), 5000);
+            });
+            
+            // Handle errors
+            this.ws.addEventListener('error', (error) => {
+                console.error('WebSocket error:', error);
+                this.updateConnectionStatus('Connection error', 'error');
+            });
+            
+        } catch (error) {
+            console.error('Error connecting to WebSocket:', error);
+            this.updateConnectionStatus('Connection failed', 'error');
+            
+            // Retry connection after a delay
+            setTimeout(() => this.connectWebSocket(), 5000);
+        }
+    }
+    
+    /**
+     * Handle incoming WebSocket messages
+     * @param {Object} message - The WebSocket message
+     */
+    handleWebSocketMessage(message) {
+        if (!message || !message.type) return;
+        
+        switch (message.type) {
+            case 'price_update': // Backend sends 'price_update'
+            case 'priceUpdate':
+                this.handlePriceUpdate(message.data);
+                break;
+            case 'trade':
+                this.handleTradeUpdate(message.data);
+                break;
+            case 'position':
+                this.handlePositionUpdate(message.data);
+                break;
+            case 'connected':
+                console.log('✅ WebSocket connection established');
+                break;
+            default:
+                console.log('Unhandled WebSocket message type:', message.type);
+        }
+    }
+    
+    handlePriceUpdate(markets) {
+        if (!markets || !Array.isArray(markets)) return;
+        
+        // Update the markets data
+        this.markets = markets;
+        
+        // Update the UI with new prices
+        this.displayMarkets(markets);
+        
+        // Update SOL price for trading calculations
+        const solMarket = markets.find(m => m.symbol === 'SOL-PERP');
+        if (solMarket) {
+            this.currentSolPrice = solMarket.price;
+            // Update any price displays in trading interface
+            const priceDisplay = document.getElementById('sol-price-display');
+            if (priceDisplay) {
+                priceDisplay.textContent = `$${solMarket.price.toFixed(2)}`;
+            }
+        }
+        
+        console.log('📊 Price update received:', markets.length, 'markets');
+    }
+    
+    handleTradeUpdate(data) {
+        console.log('💹 Trade update:', data);
+        // Handle trade updates if needed
+    }
+    
+    handlePositionUpdate(data) {
+        console.log('📈 Position update:', data);
+        // Handle position updates if needed
+        if (this.config.walletAddress) {
+            this.refreshPositions();
+        }
     }
 
     setupConsoleCapture() {
@@ -203,7 +456,8 @@ class DriftAPIInterface {
     }
 
     updateNetworkStatus(status) {
-        document.getElementById('network-status').textContent = status;
+        // This method is kept for compatibility but doesn't need to do anything
+        // since we're always showing 'Solana' as the network name
     }
 
     async fetchMarkets() {
@@ -232,39 +486,7 @@ class DriftAPIInterface {
         }
     }
 
-    displayMarkets(markets) {
-        const container = document.getElementById('markets-container');
-        
-        if (markets.length === 0) {
-            container.innerHTML = '<p class="placeholder">No markets found</p>';
-            return;
-        }
 
-        container.innerHTML = markets.map(market => `
-            <div class="market-item">
-                <div class="market-header">
-                    <div class="market-symbol">${market.symbol}</div>
-                    <div class="market-price">$${market.price.toFixed(2)}</div>
-                </div>
-                <div class="market-details">
-                    <div class="market-change ${market.change24h >= 0 ? 'positive' : 'negative'}">
-                        ${market.change24h >= 0 ? '+' : ''}${market.change24h.toFixed(2)}%
-                    </div>
-                    <div class="market-volume">Vol: $${(market.volume24h / 1000000).toFixed(2)}M</div>
-                </div>
-                <div class="market-extended">
-                    <div class="market-range">
-                        <span class="high">H: $${market.high24h?.toFixed(2) || 'N/A'}</span>
-                        <span class="low">L: $${market.low24h?.toFixed(2) || 'N/A'}</span>
-                    </div>
-                    <div class="market-funding">
-                        <span class="funding-rate">FR: ${(market.fundingRate * 100).toFixed(4)}%</span>
-                        <span class="open-interest">OI: ${(market.openInterest || 0).toLocaleString()}</span>
-                    </div>
-                </div>
-            </div>
-        `).join('');
-    }
 
     startWebSocket() {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -516,16 +738,50 @@ class DriftAPIInterface {
                 // Update UI
                 this.updateWalletUI(walletAddress);
                 
-                // Fetch USDC balance
-                await this.fetchUSDCBalance();
+                // Show loading state for positions
+                const container = document.getElementById('positions-container');
+                if (container) {
+                    container.innerHTML = [
+                        '<div class="no-positions">',
+                        '    <p>Loading positions...</p>',
+                        '</div>'
+                    ].join('\n');
+                }
+                
+                // Set up position refresh interval
+                this.setupPositionRefresh();
+                
+                // Fetch initial data
+                await Promise.all([
+                    this.fetchUSDCBalance(),
+                    this.fetchMarkets(),
+                    this.refreshPositions()
+                ]);
                 
                 this.logMessage('success', `✅ Wallet connected: ${walletAddress.substring(0, 8)}...`);
+                
+                // Connect WebSocket for real-time updates
+                this.connectWebSocket();
                 
             } catch (error) {
                 console.error('Phantom connection error:', error);
                 const errorMessage = error.message || 'Unknown error occurred';
                 this.logMessage('error', `❌ Failed to connect to Phantom: ${errorMessage}`);
                 this.showTradeStatus('error', `Failed to connect wallet: ${errorMessage}`);
+                
+                // Show error in positions container
+                const container = document.getElementById('positions-container');
+                if (container) {
+                    container.innerHTML = [
+                        '<div class="error-message">',
+                        '    <p>Failed to connect wallet</p>',
+                        '    <p class="small">' + this.escapeHtml(errorMessage) + '</p>',
+                        '    <button class="btn btn-sm btn-retry" onclick="driftAPI.connectWallet()">',
+                        '        Try Again',
+                        '    </button>',
+                        '</div>'
+                    ].join('\n');
+                }
                 
                 // If user rejected the request
                 if (error.code === 4001 || error.code === -32603) {
@@ -538,6 +794,20 @@ class DriftAPIInterface {
             const errorMessage = error.message || 'Unknown error occurred';
             this.logMessage('error', `❌ Unexpected error: ${errorMessage}`);
             this.showTradeStatus('error', 'An unexpected error occurred. Please try again.');
+            
+            // Show error in positions container
+            const container = document.getElementById('positions-container');
+            if (container) {
+                container.innerHTML = [
+                    '<div class="error-message">',
+                    '    <p>Connection error</p>',
+                    '    <p class="small">' + this.escapeHtml(errorMessage) + '</p>',
+                    '    <button class="btn btn-sm btn-retry" onclick="driftAPI.connectWallet()">',
+                    '        Try Again',
+                    '    </button>',
+                    '</div>'
+                ].join('\n');
+            }
         }
     }
 
@@ -741,7 +1011,7 @@ class DriftAPIInterface {
         try {
             // Step 1: Validate and prepare trade
             this.updateTransactionStep('prepare', 'active');
-            this.showTradeStatus('loading', 'Preparing isolated margin trade...');
+            this.showTradeStatus('loading', 'Preparing trade...');
             
             // Ensure markets are loaded
             if (!this.markets || !Array.isArray(this.markets)) {
@@ -760,122 +1030,14 @@ class DriftAPIInterface {
             }
             
             const entryPrice = solMarket.price;
-            this.logMessage('info', `🎯 Isolated Margin Trade: ${this.tradeDirection.toUpperCase()} $${tradeAmount} at ${this.currentLeverage}x`);
+            this.logMessage('info', `🎯 Trade: ${this.tradeDirection.toUpperCase()} $${tradeAmount} at ${this.currentLeverage}x`);
             this.logMessage('info', `📊 Position size: $${positionSize.toFixed(2)}, Entry: $${entryPrice}`);
             
-            // Step 2: Initialize Drift client with isolated margin
+            // Step 2: Submit to backend API
             this.updateTransactionStep('prepare', 'completed');
-            this.updateTransactionStep('client', 'active');
-            this.showTradeStatus('loading', 'Initializing Drift client for isolated margin...');
-            
-            const driftClient = await this.initializeIsolatedMarginClient();
-            
-            // Step 3: Create transaction with isolated margin
-            this.updateTransactionStep('client', 'completed');
             this.updateTransactionStep('transaction', 'active');
-            this.showTradeStatus('loading', 'Creating isolated margin trade transaction...');
+            this.showTradeStatus('loading', 'Creating trade transaction via backend API...');
             
-            const transaction = await this.createIsolatedMarginTransaction(driftClient, tradeAmount, solMarket);
-            
-            // Step 4: Send to Phantom wallet for approval
-            this.updateTransactionStep('transaction', 'completed');
-            this.updateTransactionStep('phantom', 'active');
-            this.showTradeStatus('loading', '🦋 Please approve the transaction in your Phantom wallet...');
-            
-            // Get a fresh blockhash before signing
-            const connection = new window.solanaWeb3.Connection(this.config.solanaRpc, 'confirmed');
-            const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-            transaction.recentBlockhash = blockhash;
-            transaction.lastValidBlockHeight = lastValidBlockHeight;
-            
-            const signedTransaction = await this.wallet.signTransaction(transaction);
-            
-            // Step 5: Submit to blockchain
-            this.updateTransactionStep('phantom', 'completed');
-            this.updateTransactionStep('submit', 'active');
-            this.showTradeStatus('loading', '⚡ Submitting transaction to Solana blockchain...');
-            
-            let signature;
-            try {
-                // Submit transaction via backend proxy to avoid 403 errors
-                signature = await this.submitTransactionViaBackend(signedTransaction);
-            } catch (error) {
-                if (error.message.includes('block height exceeded') || error.message.includes('Blockhash not found')) {
-                    // If the blockhash expired, refresh it and try again
-                    this.logMessage('info', '🔄 Blockhash expired, refreshing and retrying...');
-                    const { blockhash: newBlockhash, lastValidBlockHeight: newLastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
-                    transaction.recentBlockhash = newBlockhash;
-                    transaction.lastValidBlockHeight = newLastValidBlockHeight;
-                    
-                    // Re-sign the transaction with the new blockhash
-                    const reSignedTx = await this.wallet.signTransaction(transaction);
-                    signature = await this.submitTransactionViaBackend(reSignedTx);
-                } else {
-                    throw error; // Re-throw if it's a different error
-                }
-            }
-            
-            this.logMessage('success', `📤 Transaction submitted: ${signature}`);
-            
-            // Step 6: Wait for confirmation
-            this.updateTransactionStep('submit', 'completed');
-            this.updateTransactionStep('confirm', 'active');
-            this.showTradeStatus('loading', '⏳ Waiting for blockchain confirmation...');
-            
-            await this.waitForTransactionConfirmation(signature);
-            
-            // Step 7: Success and refresh
-            this.updateTransactionStep('confirm', 'completed');
-            this.showTradeStatus('success', `✅ Isolated margin trade executed successfully!\n\nDirection: ${this.tradeDirection.toUpperCase()}\nAmount: $${tradeAmount}\nLeverage: ${this.currentLeverage}x (Isolated)\nPosition Size: $${positionSize.toFixed(2)}\nEntry Price: $${entryPrice}\nTransaction: ${signature}`);
-            
-            this.logMessage('success', `🎉 Trade confirmed on-chain: ${signature}`);
-            
-            // Refresh balance and positions
-            await this.fetchUSDCBalance();
-            await this.refreshPositions();
-            
-        } catch (error) {
-            this.logMessage('error', `❌ Isolated margin trade failed: ${error.message}`);
-            this.showTradeStatus('error', `Trade failed: ${error.message}`);
-            throw error;
-        }
-    }
-    
-    async initializeIsolatedMarginClient() {
-        // No longer needed - trade submission is handled by backend API
-        console.log('🏗️ Using backend API for trade submission with real Drift SDK');
-        return { backendMode: true };
-        
-        const { DriftClient } = window.drift;
-        const connection = new window.solanaWeb3.Connection('https://api.mainnet-beta.solana.com', 'confirmed');
-        
-        const wallet = {
-            publicKey: this.wallet.publicKey,
-            signTransaction: (tx) => this.wallet.signTransaction(tx),
-            signAllTransactions: (txs) => this.wallet.signAllTransactions(txs)
-        };
-        
-        const driftClient = new DriftClient({
-            connection: connection,
-            wallet: wallet,
-            programID: 'dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH',
-            env: 'mainnet-beta',
-            // Force isolated margin mode
-            accountSubscription: {
-                type: 'websocket',
-                commitment: 'confirmed'
-            }
-        });
-        
-        await driftClient.subscribe();
-        this.logMessage('success', '🔗 Drift client initialized for isolated margin trading');
-        return driftClient;
-    }
-    
-    async createIsolatedMarginTransaction(driftClient, tradeAmount, market) {
-        this.logMessage('info', `🔗 Calling backend API for real Drift SDK trade creation...`);
-        
-        try {
             const response = await fetch('/api/trade/submit', {
                 method: 'POST',
                 headers: {
@@ -889,60 +1051,100 @@ class DriftAPIInterface {
                     marketSymbol: 'SOL-PERP'
                 })
             });
-
-            const result = await response.json();
             
             if (!response.ok) {
-                throw new Error(result.error || 'Failed to create trade transaction');
+                throw new Error(`Trade submission failed: ${response.status} ${response.statusText}`);
             }
-
-            if (!result.transactionData) {
-                throw new Error('Invalid response from server: missing transaction data');
-            }
-
-            this.logMessage('success', '✅ Backend prepared transaction data successfully');
             
-            try {
-                const { Transaction, PublicKey, SystemProgram, TransactionInstruction } = window.solanaWeb3;
-                const { instructions, blockhash, lastValidBlockHeight, feePayer } = result.transactionData;
-                
-                // Create a new transaction
-                const transaction = new Transaction({
-                    feePayer: new PublicKey(feePayer),
-                    blockhash,
-                    lastValidBlockHeight
-                });
-                
-                // Convert each instruction to a TransactionInstruction
-                for (const ix of instructions) {
-                    // Convert any public keys in the keys array
-                    const keys = (ix.keys || []).map(key => ({
-                        pubkey: new PublicKey(key.pubkey),
-                        isSigner: key.isSigner,
-                        isWritable: key.isWritable
-                    }));
-                    
-                    // Create a new transaction instruction
-                    const instruction = new TransactionInstruction({
-                        keys,
-                        programId: new PublicKey(ix.programId),
-                        data: Uint8Array.from(atob(ix.data), c => c.charCodeAt(0))
-                    });
-                    
-                    transaction.add(instruction);
-                }
-                
-                return transaction;
-            } catch (error) {
-                console.error('❌ Transaction creation error:', error);
-                throw new Error(`Transaction creation error: ${error.message}`);
+            const result = await response.json();
+            
+            if (!result.success) {
+                throw new Error(result.error || 'Trade submission failed');
             }
+            
+            // Safely determine instructions count to avoid runtime errors if backend omits the field
+const instructionsLen = result?.instructions
+    ? (Array.isArray(result.instructions) ? result.instructions.length : 1)
+    : (result?.data?.instructions
+        ? (Array.isArray(result.data.instructions) ? result.data.instructions.length : 1)
+        : 'N/A');
+this.logMessage('success', `📤 Trade instructions created: ${instructionsLen} instructions`);
+            
+            // Step 3: Sign transaction with Phantom
+            this.updateTransactionStep('transaction', 'completed');
+            this.updateTransactionStep('phantom', 'active');
+            this.showTradeStatus('loading', '🦋 Please approve the transaction in your Phantom wallet...');
+            
+            // Deserialize the transaction from the backend
+            let transaction;
+            if (result.transaction) {
+                // Legacy path: backend returned base64-encoded transaction
+                const txUint8 = Uint8Array.from(atob(result.transaction), c => c.charCodeAt(0));
+                transaction = window.solanaWeb3.Transaction.from(txUint8);
+            } else if (result.transactionData) {
+                // New structured path: rebuild transaction from instructions
+                const { transactionData } = result;
+
+                transaction = new window.solanaWeb3.Transaction({
+                    recentBlockhash: transactionData.blockhash,
+                    feePayer: new window.solanaWeb3.PublicKey(transactionData.feePayer)
+                });
+
+                transactionData.instructions.forEach(ix => {
+                    const dataUint8 = Uint8Array.from(atob(ix.data), ch => ch.charCodeAt(0));
+                    transaction.add(new window.solanaWeb3.TransactionInstruction({
+                        programId: new window.solanaWeb3.PublicKey(ix.programId),
+                        data: dataUint8,
+                        keys: ix.keys.map(k => ({
+                            pubkey: new window.solanaWeb3.PublicKey(k.pubkey),
+                            isSigner: k.isSigner,
+                            isWritable: k.isWritable
+                        }))
+                    }));
+                });
+            } else {
+                throw new Error('Backend did not return transaction data');
+            }
+            
+            // Sign the transaction
+            const signedTransaction = await this.wallet.signTransaction(transaction);
+            
+            // Step 4: Submit to blockchain
+            this.updateTransactionStep('phantom', 'completed');
+            this.updateTransactionStep('submit', 'active');
+            this.showTradeStatus('loading', '⚡ Submitting transaction to Solana blockchain...');
+            
+            // Submit transaction via backend proxy
+            const signature = await this.submitTransactionViaBackend(signedTransaction);
+            
+            this.logMessage('success', `📤 Transaction submitted: ${signature}`);
+            
+            // Step 5: Wait for confirmation
+            this.updateTransactionStep('submit', 'completed');
+            this.updateTransactionStep('confirm', 'active');
+            this.showTradeStatus('loading', '⏳ Waiting for blockchain confirmation...');
+            
+            await this.waitForTransactionConfirmation(signature);
+            
+            // Step 6: Success and refresh
+            this.updateTransactionStep('confirm', 'completed');
+            this.showTradeStatus('success', `✅ Trade executed successfully!\n\nDirection: ${this.tradeDirection.toUpperCase()}\nAmount: $${tradeAmount}\nLeverage: ${this.currentLeverage}x\nPosition Size: $${positionSize.toFixed(2)}\nEntry Price: $${entryPrice}\nTransaction: ${signature}`);
+            
+            // Auto-refresh positions after successful trade
+            setTimeout(() => {
+                this.refreshPositions();
+            }, 2000);
             
         } catch (error) {
-            this.logMessage('error', `❌ Backend trade creation failed: ${error.message}`);
+            this.logMessage('error', `❌ Trade failed: ${error.message}`);
+            this.showTradeStatus('error', `Trade failed: ${error.message}`);
             throw error;
         }
     }
+
+    // Note: initializeIsolatedMarginClient no longer needed with backend API approach
+    
+    // Note: createIsolatedMarginTransaction no longer needed with backend API approach
     
     // Transaction Progress UI Methods
     showTransactionProgress() {
@@ -1054,8 +1256,7 @@ class DriftAPIInterface {
         }
     }
 
-    async waitForTransactionConfirmation(signature) {
-        const maxRetries = 60; // 60 seconds total
+    async waitForTransactionConfirmation(signature, maxRetries = 60) {
         const checkInterval = 2000; // Check every 2 seconds
         const maxAttempts = Math.ceil(maxRetries * 1000 / checkInterval);
         const startTime = Date.now();
@@ -1239,123 +1440,241 @@ class DriftAPIInterface {
         throw new Error(errorMsg);
     }
 
-    createTradeParams(tradeAmount, solMarket) {
-        const isLong = this.tradeDirection === 'long';
-        const baseAssetAmount = (tradeAmount * this.currentLeverage) / solMarket.price;
-        
-        return {
-            marketIndex: 0, // SOL-PERP is market index 0 on Drift
-            direction: isLong ? 'long' : 'short',
-            baseAssetAmount: baseAssetAmount,
-            quoteAssetAmount: tradeAmount,
-            leverage: this.currentLeverage,
-            price: solMarket.price
-        };
+
+
+    // Helper method to escape HTML content
+    escapeHtml(unsafe) {
+        if (!unsafe) return '';
+        return String(unsafe)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
     
     async refreshPositions() {
-        if (!this.isWalletConnected) return;
+        // Prevent concurrent refreshes
+        if (this.config.isRefreshingPositions) {
+            console.log('Position refresh already in progress, skipping...');
+            return;
+        }
+        
+        const container = document.getElementById('positions-container');
+        if (!container) {
+            console.error('Positions container not found');
+            return;
+        }
+        
+        // Show loading state
+        const refreshBtn = document.getElementById('refresh-positions-btn');
+        const originalBtnText = refreshBtn ? refreshBtn.textContent : 'Refresh';
+        
+        if (refreshBtn) {
+            refreshBtn.disabled = true;
+            refreshBtn.textContent = 'Refreshing...';
+        }
+        
+        // Set loading state
+        this.config.isRefreshingPositions = true;
+        container.classList.add('loading');
         
         try {
-            const response = await fetch(`/api/markets/positions/${this.config.walletAddress}`);
-            const data = await response.json();
-            
-            if (data.success) {
-                this.displayPositions(data.positions || []);
-                document.getElementById('positions-section').style.display = 'block';
+            if (!this.config.walletAddress) {
+                container.innerHTML = `
+                    <div class="no-positions">
+                        <p>Connect your wallet to view positions</p>
+                    </div>`;
+                return;
             }
+            
+            console.log('🔄 Fetching positions for wallet:', this.config.walletAddress);
+            
+            // Use backend API to get real positions from Drift SDK
+            const response = await fetch(`/api/markets/positions/${this.config.walletAddress}`);
+        
+            if (!response.ok) {
+                throw new Error(`Failed to fetch positions: ${response.status} ${response.statusText}`);
+            }
+        
+            const result = await response.json();
+        
+            if (!result.success) {
+                throw new Error(result.error || 'Failed to fetch positions');
+            }
+        
+            const positions = result.positions || [];
+            
+            // Update the UI with the positions
+            this.displayPositions(positions);
+            
+            // Update last updated timestamp
+            const now = new Date();
+            console.log(`✅ Fetched ${positions.length} positions at ${now.toLocaleTimeString()}`);
+            
+            // Dispatch custom event for other components to listen to
+            document.dispatchEvent(new CustomEvent('positions-updated', { 
+                detail: { 
+                    positions: positions,
+                    timestamp: now.toISOString()
+                } 
+            }));
+            
         } catch (error) {
-            this.logMessage('error', `Failed to refresh positions: ${error.message}`);
+            console.error('❌ Error in refreshPositions:', error);
+            this.logMessage('error', 'Failed to refresh positions: ' + error.message);
+            
+            // Show error in UI
+            if (container) {
+                container.innerHTML = `
+                    <div class="error-message">
+                        <p>Failed to load positions</p>
+                        <p class="small">${this.escapeHtml(error.message)}</p>
+                        <button class="btn btn-sm btn-retry" onclick="driftAPI.refreshPositions()">
+                            Retry
+                        </button>
+                    </div>`;
+            }
+                
+        } finally {
+            // Reset loading state
+            this.config.isRefreshingPositions = false;
+            if (container) {
+                container.classList.remove('loading');
+            }
+            
+            // Reset refresh button
+            if (refreshBtn) {
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = originalBtnText;
+            }
         }
     }
     
     displayPositions(positions) {
         const container = document.getElementById('positions-container');
-        const noPositions = document.getElementById('no-positions');
+        if (!container) return;
         
-        if (positions.length === 0) {
-            noPositions.style.display = 'block';
-            container.innerHTML = '<div class="no-positions"><p>No open positions</p></div>';
+        if (!positions || positions.length === 0) {
+            container.innerHTML = `
+                <div class="no-positions">
+                    <p>No open positions found</p>
+                    <p class="small">Your open positions will appear here</p>
+                </div>`;
             return;
         }
         
-        noPositions.style.display = 'none';
-        container.innerHTML = positions.map(position => `
+        container.innerHTML = positions.map(position => {
+            // Format values
+            const direction = position.direction || 'long';
+            const size = parseFloat(position.size || 0).toFixed(4);
+            const entryPrice = parseFloat(position.entryPrice || 0).toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 4
+            });
+            const currentPrice = parseFloat(position.currentPrice || 0).toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 4
+            });
+            const pnl = parseFloat(position.pnl || 0);
+            const pnlPercentage = parseFloat(position.pnlPercentage || 0);
+            const leverage = parseFloat(position.leverage || 1).toFixed(1);
+            const marketSymbol = position.market ? position.market.split('-')[0] : 'SOL';
+            
+            // Determine PnL class and sign
+            const pnlClass = pnl >= 0 ? 'positive' : 'negative';
+            const pnlSign = pnl >= 0 ? '+' : '';
+            
+            return `
             <div class="position-card">
-                <div class="position-info">
-                    <div class="position-market">${position.market}</div>
-                    <div class="position-details">
-                        <span>Direction: <strong>${position.direction.toUpperCase()}</strong></span>
-                        <span>Size: <strong>$${position.size.toFixed(2)}</strong></span>
-                        <span>Entry: <strong>$${position.entryPrice.toFixed(2)}</strong></span>
-                        <span>Current: <strong>$${position.currentPrice.toFixed(2)}</strong></span>
-                        <span class="position-pnl ${position.pnl >= 0 ? 'positive' : 'negative'}">
-                            PnL: <strong>${position.pnl >= 0 ? '+' : ''}$${position.pnl.toFixed(2)}</strong>
-                        </span>
+                <div class="position-header">
+                    <span class="position-market">${position.market || 'N/A'}</span>
+                    <span class="position-direction ${direction}">${direction.toUpperCase()}</span>
+                    <span class="position-leverage">${leverage}x</span>
+                </div>
+                <div class="position-details">
+                    <div class="position-row">
+                        <span>Size:</span>
+                        <strong>${size} ${marketSymbol}</strong>
+                    </div>
+                    <div class="position-row">
+                        <span>Entry Price:</span>
+                        <strong>$${entryPrice}</strong>
+                    </div>
+                    <div class="position-row">
+                        <span>Mark Price:</span>
+                        <strong>$${currentPrice}</strong>
+                    </div>
+                    <div class="position-pnl ${pnlClass}">
+                        <span>PnL:</span>
+                        <strong>${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${Math.abs(pnlPercentage).toFixed(2)}%)</strong>
                     </div>
                 </div>
                 <div class="position-actions">
-                    <button class="btn-close" onclick="driftAPI.closePosition('${position.id}')">
+                    <button class="btn-close" onclick="driftAPI.closePosition('${position.id || ''}')">
                         Close Position
                     </button>
                 </div>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
     }
     
     async closePosition(positionId) {
         try {
+            if (!positionId) {
+                throw new Error('No position ID provided');
+            }
+            
             this.showTradeStatus('loading', 'Closing position...');
             
-            // Implementation for closing position would go here
-            // This would involve creating a reverse trade
+            // Get the position details to determine the market and direction
+            const response = await fetch(`/api/markets/positions/${this.config.walletAddress}`);
+            const data = await response.json();
+            
+            if (!data.success) {
+                throw new Error('Failed to fetch position details');
+            }
+            
+            const position = data.positions?.find(p => p.id === positionId);
+            if (!position) {
+                throw new Error('Position not found');
+            }
+            
+            // Call the close position API
+            const closeResponse = await fetch('/api/trade/close', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    walletAddress: this.config.walletAddress,
+                    market: position.market,
+                    direction: position.direction,
+                    size: position.size.toString()
+                })
+            });
+            
+            const result = await closeResponse.json();
+            
+            if (!result.success) {
+                throw new Error(result.error || 'Failed to close position');
+            }
             
             this.showTradeStatus('success', 'Position closed successfully!');
-            await this.refreshPositions();
-            await this.fetchUSDCBalance();
+            
+            // Refresh positions and balance
+            await Promise.all([
+                this.refreshPositions(),
+                this.fetchUSDCBalance()
+            ]);
             
         } catch (error) {
             this.showTradeStatus('error', `Failed to close position: ${error.message}`);
         }
     }
     
-    async initializeDriftClient() {
-        try {
-            // Check if Drift SDK and Solana web3.js are available
-            if (typeof window.drift === 'undefined' || typeof window.solanaWeb3 === 'undefined') {
-                throw new Error('Drift SDK and Solana web3.js dependencies not loaded. Trade submission temporarily disabled while dependencies are being configured.');
-            }
-            
-            const { DriftClient, Wallet, loadKeypair } = window.drift;
-            
-            // Create connection to Solana mainnet
-            const connection = new window.solanaWeb3.Connection(this.config.solanaRpc, 'confirmed');
-            
-            // Create wallet adapter for Phantom
-            const wallet = {
-                publicKey: this.wallet.publicKey,
-                signTransaction: (tx) => this.wallet.signTransaction(tx),
-                signAllTransactions: (txs) => this.wallet.signAllTransactions(txs)
-            };
-            
-            // Initialize Drift client for mainnet
-            const driftClient = new DriftClient({
-                connection: connection,
-                wallet: wallet,
-                programID: 'dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH', // Drift mainnet program ID
-                env: 'mainnet-beta'
-            });
-            
-            await driftClient.subscribe();
-            
-            this.logMessage('success', '🔗 Drift client initialized for mainnet');
-            return driftClient;
-            
-        } catch (error) {
-            this.logMessage('error', `❌ Failed to initialize Drift client: ${error.message}`);
-            throw error;
-        }
-    }
+    // Note: Drift client functionality is now handled by backend APIs
+    // This is more efficient than bundling the entire SDK in the browser
     
     createTradeParams(tradeAmount, solMarket) {
         const isLong = this.tradeDirection === 'long';
@@ -1436,6 +1755,40 @@ class DriftAPIInterface {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    /**
+     * Sets up a periodic refresh of the user's positions
+     * This method is called during app initialization and after wallet connection
+     */
+    setupPositionRefresh() {
+        // Clear any existing timer to avoid duplicates
+        if (this.config.positionRefreshTimer) {
+            clearInterval(this.config.positionRefreshTimer);
+            this.config.positionRefreshTimer = null;
+        }
+
+        // Only set up the timer if we have a connected wallet
+        if (this.config.walletAddress) {
+            // Initial refresh
+            this.refreshPositions().catch(error => {
+                console.error('Error in initial position refresh:', error);
+            });
+
+            // Set up periodic refresh
+            this.config.positionRefreshTimer = setInterval(() => {
+                // Only refresh if not already refreshing
+                if (!this.config.isRefreshingPositions) {
+                    this.refreshPositions().catch(error => {
+                        console.error('Error in periodic position refresh:', error);
+                    });
+                }
+            }, this.config.positionRefreshInterval);
+
+            console.log(`✅ Position auto-refresh enabled (every ${this.config.positionRefreshInterval / 1000} seconds)`);
+        } else {
+            console.log('Position auto-refresh not started: No wallet connected');
+        }
+    }
+
     // Update the displayMarkets method to track SOL price
     displayMarkets(markets) {
         const container = document.getElementById('markets-container');
@@ -1479,10 +1832,7 @@ class DriftAPIInterface {
     }
 }
 
-// Initialize the app when the page loads
-document.addEventListener('DOMContentLoaded', () => {
-    new DriftAPIInterface();
-});
+// Note: Initialization is now handled by the HTML file to ensure proper dependency loading
 
 // Add some demo data and sample WebSocket messages
 window.sampleWebSocketMessages = {

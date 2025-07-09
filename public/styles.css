@@ -56,6 +56,30 @@ body {
     gap: 10px;
 }
 
+.status-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.solana-network {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+}
+
+.solana-logo {
+    width: 28px;  /* Increased from 20px */
+    height: 28px; /* Increased from 20px */
+    object-fit: contain;
+}
+
+.network-name {
+    color: #000000; /* Black text */
+    font-size: 1.05em; /* Slightly larger text */
+}
+
 .status-label {
     font-weight: 600;
     color: #2c3e50;

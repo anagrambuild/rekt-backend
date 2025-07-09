@@ -6,6 +6,7 @@
     <meta name="web3" content="none">
     <title>REKT - Drift Protocol API Interface</title>
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="css/positions.css">
 </head>
 <body>
     <div class="container">
@@ -21,7 +22,10 @@
             </div>
             <div class="status-item">
                 <span class="status-label">Network:</span>
-                <span id="network-status" class="status-value">Not Connected</span>
+                <div class="solana-network">
+                    <img src="/solana.png" alt="Solana" class="solana-logo">
+                    <span class="network-name">Solana</span>
+                </div>
             </div>
         </div>
 
@@ -115,14 +119,14 @@
                     </div>
                     
                     <!-- Open Positions Section -->
-                    <div class="card" id="positions-section" style="display: none;">
-                        <h2>📊 Open Positions</h2>
-                        <div class="positions-container" id="positions-container">
-                            <div class="no-positions" id="no-positions">
-                                <p>No open positions</p>
-                            </div>
+                    <div class="card" id="positions-section">
+                        <div class="positions-header">
+                            <h3>📊 Open Positions</h3>
+                            <button id="refresh-positions-btn" class="btn btn-secondary">🔄 Refresh</button>
                         </div>
-                        <button id="refresh-positions-btn" class="btn btn-secondary">🔄 Refresh Positions</button>
+                        <div id="positions-container">
+                            <!-- Positions will be dynamically inserted here by JavaScript -->
+                        </div>
                     </div>
                 </div>
             </div>
@@ -202,6 +206,26 @@
     <!-- Load Solana web3.js from jsDelivr CDN -->
     <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.87.6/lib/index.iife.min.js"></script>
     
+    <!-- Real data integration via backend APIs -->
+    <script>
+        // Use backend APIs for real Drift data instead of mocking
+        // This is more efficient than bundling the entire SDK
+        console.log('✅ Using backend APIs for real Drift data');
+    </script>
+    
     <script src="app.js"></script>
+    
+    <!-- Initialize global driftAPI variable -->
+    <script>
+        // Initialize the global driftAPI instance after DOM is loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            if (typeof DriftAPIInterface !== 'undefined') {
+                window.driftAPI = new DriftAPIInterface();
+                console.log('✅ Global driftAPI instance created');
+            } else {
+                console.error('❌ DriftAPIInterface not found');
+            }
+        });
+    </script>
 </body>
 </html>
