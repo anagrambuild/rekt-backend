@@ -1667,6 +1667,10 @@ this.logMessage('success', `📤 Trade instructions created: ${instructionsLen} 
             const pnl = parseFloat(position.pnl || 0);
             const pnlPercentage = parseFloat(position.pnlPercentage || 0);
             const leverage = parseFloat(position.leverage || 1).toFixed(1);
+            const liquidationPrice = parseFloat(position.liquidationPrice || 0).toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 4
+            });
             const marketSymbol = position.market ? position.market.split('-')[0] : 'SOL';
             
             // Determine PnL class and sign
@@ -1692,6 +1696,10 @@ this.logMessage('success', `📤 Trade instructions created: ${instructionsLen} 
                     <div class="position-row">
                         <span>Mark Price:</span>
                         <strong>$${currentPrice}</strong>
+                    </div>
+                    <div class="position-row">
+                        <span>Liquidation:</span>
+                        <strong class="liquidation-price">$${liquidationPrice}</strong>
                     </div>
                     <div class="position-pnl ${pnlClass}">
                         <span>PnL:</span>
