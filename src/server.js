@@ -19,6 +19,60 @@ const RPC_MIN_INTERVAL = 1000; // Increased from 250ms to 1000ms (1 second)
 const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY = 1000; // 1 second
 
+// Constants - Define as strings to avoid initialization issues
+const USDC_MINT_ADDRESS = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const DRIFT_PROGRAM_ID_ADDRESS = 'dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH';
+
+// Helper function to get USDC mint
+const getUSDCMint = () => new PublicKey(USDC_MINT_ADDRESS);
+const getDriftProgramID = () => new PublicKey(DRIFT_PROGRAM_ID_ADDRESS);
+
+// Shared utility functions
+const createReadOnlyWallet = (publicKey) => ({
+  publicKey,
+  signTransaction: () => Promise.reject(new Error('Read-only client')),
+  signAllTransactions: () => Promise.reject(new Error('Read-only client'))
+});
+
+const createConnection = async (customRpcUrl = CUSTOM_RPC_URL) => {
+  return await withRetry(async () => {
+    const connection = new Connection(customRpcUrl, 'confirmed');
+    await connection.getSlot(); // Test connection
+    return connection;
+  });
+};
+
+const createDriftClient = async (connection, walletPublicKey, cluster = 'mainnet-beta') => {
+  const readOnlyWallet = createReadOnlyWallet(walletPublicKey);
+  const driftClient = new DriftClient({
+    connection,
+    wallet: readOnlyWallet,
+    programID: getDriftProgramID(),
+    env: cluster,
+    opts: {
+      commitment: 'confirmed',
+      skipPreflight: true,
+    },
+  });
+  await driftClient.subscribe();
+  return driftClient;
+};
+
+const handleError = (res, error, context = 'Operation') => {
+  console.error(`❌ ${context} error:`, error);
+  return res.status(500).json({
+    success: false,
+    error: error.message || `${context} failed`,
+    details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+  });
+};
+
+const validateWalletAddress = (address) => {
+  if (!address || typeof address !== 'string') return false;
+  const trimmed = address.trim();
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed);
+};
+
 const rpcRateLimit = async () => {
   const now = Date.now();
   const timeSinceLastCall = now - lastRpcCall;
@@ -119,7 +173,7 @@ app.get('/api/markets', (req, res) => {
 
 // Wallet endpoints are now handled by the improved USDC balance endpoint below
 
-// Real Drift SDK Trade Submission Endpoint
+// Real Drift SDK Trade Submission Endpoint - Refactored with shared utilities
 app.post('/api/trade/submit', async (req, res) => {
   try {
     const { walletAddress, tradeAmount, leverage, direction, marketSymbol } = req.body;
@@ -141,6 +195,14 @@ app.post('/api/trade/submit', async (req, res) => {
       });
     }
     
+    // Validate wallet address
+    if (!validateWalletAddress(walletAddress)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid wallet address'
+      });
+    }
+    
     if (marketSymbol !== 'SOL-PERP') {
       return res.status(400).json({
         success: false,
@@ -155,33 +217,17 @@ app.post('/api/trade/submit', async (req, res) => {
     await retryWithBackoff(async () => {
       console.log('🔗 Connecting to Solana mainnet via custom RPC with rate limiting...');
       
-      // Initialize Solana connection using user's custom RPC
-      const connection = new Connection(CUSTOM_RPC_URL, 'confirmed');
-      
       // Set cluster for Drift client
       const CLUSTER = process.env.DRIFT_CLUSTER || 'mainnet-beta';
       
-      // Create a read-only wallet for the Drift client (actual signing happens in frontend)
+      // Create connection and Drift client using shared utilities
+      const connection = await createConnection();
       const publicKey = new PublicKey(walletAddress);
-      const readOnlyWallet = {
-        publicKey: publicKey,
-        signTransaction: async (tx) => { throw new Error('Signing not supported in read-only mode'); },
-        signAllTransactions: async (txs) => { throw new Error('Signing not supported in read-only mode'); }
-      };
       
-      // Initialize Drift client
-      console.log('🌊 Initializing Drift client with mainnet environment...');
-      await initialize({ env: 'mainnet-beta' });
-      const driftClient = new DriftClient({
-        connection: connection,
-        wallet: readOnlyWallet,
-        programID: new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH'),
-        env: CLUSTER,
-      });
-      
-      // Subscribe to get market data
-      console.log('📦 Subscribing to Drift client...');
-      await driftClient.subscribe();
+      // Initialize Drift client using shared utility
+      console.log('🌊 Initializing Drift client with environment:', CLUSTER);
+      await initialize({ env: CLUSTER });
+      const driftClient = await createDriftClient(connection, publicKey, CLUSTER);
       
       try {
         // Get SOL-PERP market (index 0) - load accounts if needed
@@ -401,7 +447,7 @@ app.post('/api/trade/close', async (req, res) => {
         signTransaction: () => Promise.reject(new Error('Read-only client')),
         signAllTransactions: () => Promise.reject(new Error('Read-only client'))
       },
-      programID: new PublicKey('dRiftyHA39MWEa3xz9KAZVHAqJzYP6Fh5zHHB6BJHETX'),
+      programID: getDriftProgramID(),
       env: CLUSTER,
       opts: {
         commitment: 'confirmed',
@@ -444,87 +490,158 @@ app.post('/api/trade/close', async (req, res) => {
   }
 });
 
-// Positions endpoint
+// Positions endpoint - Refactored with shared utilities
 app.get('/api/markets/positions/:wallet', async (req, res) => {
-  let driftClient;
-  try {
-    let { wallet } = req.params;
-    wallet = (wallet || '').trim();
-    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) {
-      return res.status(400).json({ success: false, error: 'Invalid wallet address' });
+let driftClient;
+try {
+    const { wallet: walletParam } = req.params;
+    console.log(`📍 Positions request received for wallet: ${walletParam}`);
+    console.log(`📋 Wallet validation - Length: ${walletParam.length}, Format: ${walletParam}`);
+        
+    // Validate wallet address
+    if (!validateWalletAddress(walletParam)) {
+        console.log(`❌ Wallet validation failed for: ${walletParam}`);
+        return res.status(400).json({ success: false, error: 'Invalid wallet address' });
     }
-    console.log(`Fetching positions for wallet: ${wallet}`);
-    // ---- Cluster & RPC setup ----
-    const { Connection, PublicKey, clusterApiUrl } = require('@solana/web3.js');
+    console.log(`✅ Wallet validation passed`);
 
-
-    // Select cluster (default devnet for local testing)
-    const CLUSTER = process.env.DRIFT_CLUSTER || 'devnet'; // 'mainnet-beta' | 'devnet'
-    const rpcUrl = process.env.SOLANA_RPC_URL || clusterApiUrl(CLUSTER);
-
-    // Validate & parse wallet pubkey safely
+    // Parse wallet address to PublicKey
     let walletPubkey;
     try {
-      walletPubkey = new PublicKey(wallet);
+        walletPubkey = new PublicKey(walletParam);
+        console.log(`✅ PublicKey created successfully: ${walletPubkey.toString()}`);
     } catch (err) {
-      console.error('Invalid wallet address:', wallet, err);
-      return res.status(400).json({ success: false, error: 'Invalid wallet address' });
+        console.error('❌ Invalid wallet address:', walletParam, err);
+        return res.status(400).json({ success: false, error: 'Invalid wallet address' });
     }
 
+    // Use mainnet-beta only with custom RPC
+    const CLUSTER = 'mainnet-beta';
+    const rpcUrl = process.env.SOLANA_RPC_URL || CUSTOM_RPC_URL;
+    
+    console.log(`🔍 Connecting to ${CLUSTER}`);
+    console.log(`🔗 Using RPC: ${rpcUrl}`);
+    
     const connection = new Connection(rpcUrl, 'confirmed');
     
-    // Initialize Drift client
-
-
+    // Create Drift client using shared utility
+    driftClient = await createDriftClient(connection, walletPubkey, CLUSTER);
     
-
+    // Fetch user accounts using the correct method
+    let userAccounts = [];
+    let activeUserAccount = null;
     
-    // Create a read-only Drift client
-    driftClient = new DriftClient({
-      connection,
-      wallet: {
-        publicKey: walletPubkey,
-        signTransaction: () => Promise.reject(new Error('Read-only client')),
-        signAllTransactions: () => Promise.reject(new Error('Read-only client'))
-      },
-      programID: new PublicKey('dRiftyHA39MWEa3xz9KAZVHAqJzYP6Fh5zHHB6BJHETX'),
-      env: CLUSTER,
-      opts: {
-        commitment: 'confirmed',
-        skipPreflight: true,
-      },
-    });
+    try {
+      // Get all user accounts for this authority (wallet)
+      userAccounts = await driftClient.getUserAccountsForAuthority(walletPubkey);
+      console.log(`✅ Found ${userAccounts.length} user accounts for wallet`);
+      
+      // Find the account with positions (usually subaccount 0)
+      activeUserAccount = userAccounts.find(account => 
+        account.perpPositions?.some(pos => !pos.baseAssetAmount.isZero())
+      ) || userAccounts[0]; // Fallback to first account if no positions found
+      
+      if (activeUserAccount) {
+        console.log(`✅ Using subaccount ${activeUserAccount.subAccountId}`);
+      }
+    } catch (getUserError) {
+      console.log(`❌ No user accounts found on ${CLUSTER}:`, getUserError.message);
+    }
     
-    // Initialize the client
-    await driftClient.subscribe();
-    
-    // Fetch Drift `User` object
-    const user = await driftClient.getUser(walletPubkey);
-    const userAccount = user ? user.getUserAccount() : null;
-    
-    if (!userAccount) {
+    if (!activeUserAccount) {
+      console.log(`No Drift user found for wallet: ${walletParam}`);
       return res.json({
         success: true,
         positions: [],
-        message: 'No positions found for this wallet',
+        message: 'No Drift account found for this wallet on mainnet-beta. User has not interacted with Drift Protocol yet.',
         timestamp: new Date().toISOString()
       });
     }
     
-    // Get all perp positions
-    const positions = (userAccount.perpPositions || userAccount.positions)
-      .filter(pos => !pos.baseAssetAmount.isZero()) // Only include open positions
-      .map(pos => ({
-        market: 'SOL-PERP', // TODO: Map market index to symbol
-        direction: pos.baseAssetAmount.gt(0) ? 'long' : 'short',
-        size: Math.abs(parseFloat(pos.baseAssetAmount.toString()) / 1e9), // Convert to SOL
-        entryPrice: parseFloat(pos.entryPrice.toString()) / 1e9,
-        currentPrice: parseFloat(driftClient.getOracleDataForMarket(0).price.toString()) / 1e9, // Current SOL price
-        pnl: 0, // TODO: Calculate PnL
-        pnlPercentage: 0, // TODO: Calculate PnL percentage
-        id: pos.marketIndex.toString(),
-        leverage: parseFloat(pos.leverage.toString()) / 1e4
-      }));
+    console.log(`📊 Processing positions for wallet on ${CLUSTER}`);
+    
+    // Process and format positions
+    const positions = (activeUserAccount.perpPositions || activeUserAccount.positions)
+      .filter(pos => !pos.baseAssetAmount.isZero())
+      .map(pos => {
+        try {
+          // Map market index to market name
+          const getMarketName = (marketIndex) => {
+            switch (marketIndex) {
+              case 0: return 'SOL-PERP';
+              case 1: return 'BTC-PERP';
+              case 2: return 'ETH-PERP';
+              default: return `PERP-${marketIndex}`;
+            }
+          };
+          
+          // Get mark price (current market price) safely
+          let markPrice = 0;
+          try {
+            const oracleData = driftClient.getOracleDataForPerpMarket(pos.marketIndex || 0);
+            markPrice = parseFloat(oracleData.price.toString()) / 1e6; // PRICE_PRECISION is 1e6
+          } catch (e) {
+            console.warn(`Could not fetch mark price for market ${pos.marketIndex}:`, e.message);
+          }
+          
+          // Calculate position size in base asset units (e.g., SOL)
+          const positionSize = Math.abs(parseFloat(pos.baseAssetAmount.toString()) / 1e9); // BASE_PRECISION is 1e9
+          
+          // Calculate average entry price
+          // entryPrice = quoteEntryAmount / baseAssetAmount (accounting for precision)
+          const quoteEntry = pos.quoteEntryAmount ? parseFloat(pos.quoteEntryAmount.toString()) / 1e6 : 0; // QUOTE_PRECISION is 1e6
+          const baseEntry = parseFloat(pos.baseAssetAmount.toString()) / 1e9;
+          const avgEntryPrice = baseEntry !== 0 ? Math.abs(quoteEntry / baseEntry) : 0;
+          
+          // Calculate unrealized PnL
+          const isLong = pos.baseAssetAmount.gt(0);
+          let unrealizedPnl = 0;
+          let pnlPercentage = 0;
+          
+          if (markPrice > 0 && avgEntryPrice > 0) {
+            if (isLong) {
+              unrealizedPnl = (markPrice - avgEntryPrice) * positionSize;
+            } else {
+              unrealizedPnl = (avgEntryPrice - markPrice) * positionSize;
+            }
+            pnlPercentage = (unrealizedPnl / (avgEntryPrice * positionSize)) * 100;
+          }
+          
+          return {
+            market: getMarketName(pos.marketIndex || 0),
+            direction: isLong ? 'long' : 'short',
+            size: positionSize,
+            sizeLabel: `${positionSize.toFixed(4)} SOL`, // Clear size with units
+            entryPrice: avgEntryPrice,
+            markPrice: markPrice, // Current market price from oracle
+            currentPrice: markPrice, // Alias for compatibility
+            pnl: unrealizedPnl,
+            pnlPercentage: pnlPercentage,
+            id: (pos.marketIndex || 0).toString(),
+            marketIndex: pos.marketIndex || 0,
+            // Debug info
+            baseAssetAmount: pos.baseAssetAmount.toString(),
+            quoteAssetAmount: pos.quoteAssetAmount ? pos.quoteAssetAmount.toString() : '0',
+            quoteEntryAmount: pos.quoteEntryAmount ? pos.quoteEntryAmount.toString() : '0'
+          };
+        } catch (error) {
+          console.error('Error processing position:', error.message);
+          return null;
+        }
+      })
+      .filter(pos => pos !== null);
+    
+    console.log(`✅ Successfully processed ${positions.length} positions`);
+    if (positions.length > 0) {
+      console.log('Position summary:', positions.map(p => ({
+        market: p.market,
+        direction: p.direction,
+        size: p.sizeLabel,
+        entryPrice: `$${p.entryPrice.toFixed(2)}`,
+        markPrice: `$${p.markPrice.toFixed(2)}`,
+        pnl: `$${p.pnl.toFixed(2)} (${p.pnlPercentage.toFixed(2)}%)`
+      })));
+    }
     
     res.json({
       success: true,
@@ -533,12 +650,7 @@ app.get('/api/markets/positions/:wallet', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error fetching positions:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch positions',
-      message: error.message
-    });
+    return handleError(res, error, 'Positions fetch');
   } finally {
     if (driftClient) {
       try {
@@ -568,51 +680,41 @@ wss.on('connection', (ws) => {
   });
 });
 
-// USDC Token Mint Address (USDC on Solana mainnet)
-const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
-
-// USDC Balance Endpoint
+// USDC Balance Endpoint - Refactored with shared utilities
 app.get('/api/wallet/:walletAddress/usdc-balance', async (req, res) => {
     try {
         const { walletAddress } = req.params;
         console.log(`🔍 Fetching USDC balance for wallet: ${walletAddress}`);
         
-        if (!walletAddress) {
-            console.error('❌ Wallet address is required');
+        // Validate wallet address using shared utility
+        if (!validateWalletAddress(walletAddress)) {
             return res.status(400).json({ 
                 success: false,
-                error: 'Wallet address is required' 
+                error: 'Invalid wallet address' 
             });
         }
 
-        // Validate wallet address
+        // Parse wallet address to PublicKey
         let publicKey;
         try {
             publicKey = new PublicKey(walletAddress);
         } catch (e) {
             console.error(`❌ Invalid wallet address: ${walletAddress}`, e);
-            return res.status(400).json({ 
+            return res.status(400).json({
                 success: false,
-                error: 'Invalid wallet address format' 
+                error: 'Invalid wallet address'
             });
         }
 
-        console.log(`🔗 Connecting to Solana RPC: ${CUSTOM_RPC_URL}`);
-        const connection = new Connection(CUSTOM_RPC_URL, 'confirmed');
+        // Create connection using shared utility
+        const connection = await createConnection();
+        console.log(`✅ Connected to Solana RPC`);
         
-        // Test RPC connection
-        try {
-            const slot = await connection.getSlot();
-            console.log(`✅ Connected to Solana RPC. Current slot: ${slot}`);
-        } catch (e) {
-            console.error('❌ Failed to connect to Solana RPC:', e);
-            throw new Error(`Failed to connect to Solana RPC: ${e.message}`);
-        }
-        
+        // Fetch USDC token accounts
         console.log(`🔍 Fetching token accounts for wallet: ${walletAddress}`);
         const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
             publicKey,
-            { mint: USDC_MINT }
+            { mint: getUSDCMint() }
         );
 
         console.log(`📊 Found ${tokenAccounts.value.length} USDC token accounts`);
@@ -639,60 +741,60 @@ app.get('/api/wallet/:walletAddress/usdc-balance', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('❌ Error in USDC balance endpoint:', {
-            error: error.message,
-            stack: error.stack,
-            wallet: req.params.walletAddress,
-            timestamp: new Date().toISOString()
-        });
-        
-        res.status(500).json({
-            success: false,
-            error: error.message || 'Failed to fetch USDC balance',
-            wallet: req.params.walletAddress,
-            timestamp: new Date().toISOString()
-        });
+        return handleError(res, error, 'USDC balance fetch');
     }
 });
 
-// Price update broadcasting
+// Price update broadcasting - Refactored for better performance
 function startPriceUpdates() {
-  setInterval(() => {
+  // Store base prices to avoid recalculation
+  const baseMarkets = [
+    {
+      symbol: 'SOL-PERP',
+      basePrice: 151.80,
+      volatility: 2,
+      volume24h: 1000000,
+      high24h: 155.0,
+      low24h: 148.0,
+      funding: 0.01,
+      openInterest: 5000000
+    },
+    {
+      symbol: 'BTC-PERP',
+      basePrice: 65000,
+      volatility: 1000,
+      volume24h: 5000000,
+      high24h: 67000,
+      low24h: 63000,
+      funding: 0.005,
+      openInterest: 100000000
+    },
+    {
+      symbol: 'ETH-PERP',
+      basePrice: 2800,
+      volatility: 50,
+      volume24h: 3000000,
+      high24h: 2850,
+      low24h: 2580,
+      funding: 0.008,
+      openInterest: 30000000
+    }
+  ];
+  
+  const priceUpdateInterval = setInterval(() => {
     if (connectedClients.size === 0) return;
     
-    // Generate slightly random price changes
-    const markets = [
-      {
-        symbol: 'SOL-PERP',
-        price: 151.80 + (Math.random() - 0.5) * 2, // ±$1 variation
-        volume24h: 1000000,
-        change24h: 2.5 + (Math.random() - 0.5) * 0.5,
-        high24h: 155.0,
-        low24h: 148.0,
-        funding: 0.01,
-        openInterest: 5000000
-      },
-      {
-        symbol: 'BTC-PERP', 
-        price: 108900 + (Math.random() - 0.5) * 200, // ±$100 variation
-        volume24h: 50000000,
-        change24h: -1.2 + (Math.random() - 0.5) * 0.3,
-        high24h: 110000,
-        low24h: 107000,
-        funding: -0.005,
-        openInterest: 100000000
-      },
-      {
-        symbol: 'ETH-PERP',
-        price: 2615 + (Math.random() - 0.5) * 20, // ±$10 variation
-        volume24h: 20000000,
-        change24h: 1.8 + (Math.random() - 0.5) * 0.4,
-        high24h: 2650,
-        low24h: 2580,
-        funding: 0.008,
-        openInterest: 30000000
-      }
-    ];
+    // Generate price updates with improved efficiency
+    const markets = baseMarkets.map(market => ({
+      symbol: market.symbol,
+      price: market.basePrice + (Math.random() - 0.5) * market.volatility,
+      change24h: 2.5 + (Math.random() - 0.5) * 0.5,
+      volume24h: market.volume24h,
+      high24h: market.high24h,
+      low24h: market.low24h,
+      funding: market.funding,
+      openInterest: market.openInterest
+    }));
     
     const message = JSON.stringify({
       type: 'price_update',
@@ -700,14 +802,23 @@ function startPriceUpdates() {
       timestamp: new Date().toISOString()
     });
     
+    // More efficient client broadcasting with cleanup
+    const activeClients = [];
     connectedClients.forEach(ws => {
       if (ws.readyState === ws.OPEN) {
+        activeClients.push(ws);
         ws.send(message);
+      } else {
+        // Clean up closed connections
+        connectedClients.delete(ws);
       }
     });
     
-    console.log(`📊 Price update sent to ${connectedClients.size} clients`);
+    console.log(`📊 Price update sent to ${activeClients.length} clients`);
   }, 5000); // Update every 5 seconds
+  
+  // Return interval for potential cleanup
+  return priceUpdateInterval;
 }
 
 // Handle transaction submission from frontend
@@ -726,16 +837,9 @@ app.post('/api/transaction/submit', async (req, res) => {
             // Convert base64 back to buffer
             const txBuffer = Buffer.from(signedTransaction, 'base64');
             
-            // Initialize connection with retry
-            console.log('🔗 Connecting to Solana mainnet via custom RPC...');
-            
-            const connection = await withRetry(async () => {
-                console.log('🌐 Creating new Solana connection...');
-                const conn = new Connection(CUSTOM_RPC_URL, 'confirmed');
-                // Test the connection
-                await conn.getBlockHeight();
-                return conn;
-            });
+            // Use shared connection utility
+            console.log('🔗 Connecting to Solana via shared utility...');
+            const connection = await createConnection();
             
             // Send the raw transaction directly - no need for Drift client here
             console.log('📤 Sending raw transaction to Solana network...');
@@ -788,7 +892,7 @@ app.post('/api/transaction/submit', async (req, res) => {
     }
 });
 
-// Add transaction status endpoint
+// Transaction status endpoint - Refactored with shared utilities
 app.get('/api/transaction/status', async (req, res) => {
     try {
         const { signature } = req.query;
@@ -800,14 +904,8 @@ app.get('/api/transaction/status', async (req, res) => {
             });
         }
         
-        // Initialize connection with retry
-        const connection = await withRetry(async () => {
-            console.log('🌐 Creating new Solana connection for status check...');
-            const conn = new Connection(CUSTOM_RPC_URL, 'confirmed');
-            // Test the connection
-            await conn.getSlot();
-            return conn;
-        });
+        // Use shared connection utility
+        const connection = await createConnection();
         
         // First try to get the signature status
         const status = await connection.getSignatureStatus(signature, {
@@ -853,12 +951,7 @@ app.get('/api/transaction/status', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('❌ Error checking transaction status:', error);
-        return res.status(500).json({
-            success: false,
-            error: 'Failed to check transaction status',
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        });
+        return handleError(res, error, 'Transaction status check');
     }
 });
 

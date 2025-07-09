@@ -438,6 +438,7 @@ class DriftAPIInterface {
         
         // Wallet controls
         document.getElementById('connect-wallet-btn').addEventListener('click', () => this.connectWallet());
+        
         document.getElementById('disconnect-wallet-btn').addEventListener('click', () => this.disconnectWallet());
         
         // Trading controls
@@ -703,7 +704,7 @@ class DriftAPIInterface {
                 this.logMessage('error', 'Window object not available');
                 return;
             }
-
+            
             // Check if Phantom is available
             if (!window.solana) {
                 // Open Phantom install page in a new tab
@@ -720,11 +721,16 @@ class DriftAPIInterface {
                 return;
             }
 
-            this.logMessage('info', '👛 Connecting to Phantom wallet...');
+            this.logMessage('info', '👋 Connecting to Phantom wallet...');
             
             try {
-                // Connect to Phantom
-                const response = await window.solana.connect({ onlyIfTrusted: false });
+                // Connect to Phantom with timeout to prevent hanging
+                const connectPromise = window.solana.connect({ onlyIfTrusted: false });
+                const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Connection timeout - Phantom popup may be blocked')), 10000);
+                });
+                
+                const response = await Promise.race([connectPromise, timeoutPromise]);
                 
                 if (!response || !response.publicKey) {
                     throw new Error('Invalid response from wallet');
@@ -764,7 +770,12 @@ class DriftAPIInterface {
                 this.connectWebSocket();
                 
             } catch (error) {
-                console.error('Phantom connection error:', error);
+                console.error('🔍 Phantom connection error details:', {
+                    message: error.message,
+                    code: error.code,
+                    stack: error.stack,
+                    name: error.name
+                });
                 const errorMessage = error.message || 'Unknown error occurred';
                 this.logMessage('error', `❌ Failed to connect to Phantom: ${errorMessage}`);
                 this.showTradeStatus('error', `Failed to connect wallet: ${errorMessage}`);
