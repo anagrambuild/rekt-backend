@@ -569,6 +569,55 @@ body {
     color: #0c5460;
 }
 
+/* Wallet Action Buttons */
+.wallet-actions {
+    display: inline-flex;
+    gap: 8px;
+    vertical-align: middle;
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: #7f8c8d;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    transition: all 0.2s ease;
+    width: 24px;
+    height: 24px;
+}
+
+.icon-btn:hover {
+    background: rgba(0, 0, 0, 0.05);
+    color: #2c3e50;
+}
+
+.icon-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+#view-on-explorer {
+    text-decoration: none;
+    color: inherit;
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+    .icon-btn {
+        color: #bdc3c7;
+    }
+    
+    .icon-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: #ecf0f1;
+    }
+}
+
 .api-test-item h3 {
     color: #2c3e50;
     margin-bottom: 15px;

@@ -568,6 +568,8 @@ class DriftAPIInterface {
         const connectedState = document.getElementById('wallet-connected');
         const tradingInterface = document.getElementById('trading-interface');
         const walletAddressDisplay = document.getElementById('wallet-address-display');
+        const copyButton = document.getElementById('copy-wallet-address');
+        const explorerLink = document.getElementById('view-on-explorer');
         
         if (walletAddress) {
             // Show connected state
@@ -575,12 +577,48 @@ class DriftAPIInterface {
             connectedState.style.display = 'block';
             tradingInterface.style.display = 'block';
             
-            walletAddressDisplay.textContent = `${walletAddress.substring(0, 8)}...${walletAddress.slice(-4)}`;
+            const displayAddress = `${walletAddress.substring(0, 8)}...${walletAddress.slice(-4)}`;
+            walletAddressDisplay.textContent = displayAddress;
+            
+            // Show action buttons
+            copyButton.style.display = 'inline-flex';
+            explorerLink.style.display = 'inline-flex';
+            
+            // Update explorer link to use Solana Beach
+            explorerLink.href = `https://solanabeach.io/address/${walletAddress}`;
+            
+            // Set up copy to clipboard
+            copyButton.onclick = async (e) => {
+                e.preventDefault();
+                try {
+                    await navigator.clipboard.writeText(walletAddress);
+                    this.logMessage('success', '✅ Wallet address copied to clipboard');
+                    
+                    // Show feedback
+                    const originalText = copyButton.innerHTML;
+                    copyButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+                    copyButton.title = 'Copied!';
+                    
+                    // Reset after 2 seconds
+                    setTimeout(() => {
+                        copyButton.innerHTML = originalText;
+                        copyButton.title = 'Copy to clipboard';
+                    }, 2000);
+                } catch (err) {
+                    console.error('Failed to copy address:', err);
+                    this.logMessage('error', '❌ Failed to copy address to clipboard');
+                }
+            };
+            
         } else {
             // Show disconnected state
             disconnectedState.style.display = 'block';
             connectedState.style.display = 'none';
             tradingInterface.style.display = 'none';
+            
+            // Hide action buttons
+            copyButton.style.display = 'none';
+            explorerLink.style.display = 'none';
             
             walletAddressDisplay.textContent = 'Not Connected';
             document.getElementById('usdc-balance-display').textContent = '$0.00';
