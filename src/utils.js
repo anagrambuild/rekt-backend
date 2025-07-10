@@ -86,7 +86,7 @@ async function createConnection(retryCount = 0) {
 
 /**
  * DriftClient Factory
- * Creates configured DriftClient instances with proper cleanup
+ * Creates configured DriftClient instances with proper cleanup and account loading
  */
 async function createDriftClient(connection, walletAddress) {
   try {
@@ -100,15 +100,49 @@ async function createDriftClient(connection, walletAddress) {
       signAllTransactions: () => Promise.reject(new Error('Read-only client'))
     };
     
-    // Initialize Drift client with minimal configuration for read-only operations
+    // Import BulkAccountLoader from the SDK
+    const { BulkAccountLoader } = require('@drift-labs/sdk');
+    
+    // Create BulkAccountLoader with optimized settings for margin calculations
+    const bulkAccountLoader = new BulkAccountLoader(
+      connection,
+      'confirmed', // Use 'confirmed' commitment for balance between speed and reliability
+      1000 // Poll every 1000ms for fresh data
+    );
+    
+    console.log('📦 Setting up account subscription with BulkAccountLoader...');
+    
+    // Initialize Drift client with proper account subscription
     const driftClient = new DriftClient({
       connection,
       wallet,
-      env: DRIFT_CLUSTER
+      env: DRIFT_CLUSTER,
+      accountSubscription: {
+        type: 'polling',
+        accountLoader: bulkAccountLoader,
+      },
     });
     
+    console.log('🔔 Subscribing to Drift client...');
     await driftClient.subscribe();
-    console.log('✅ Drift client initialized successfully');
+    
+    // Wait for initial account data to be loaded
+    console.log('⏳ Waiting for account data to load...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Verify that market accounts are accessible
+    try {
+      const market = driftClient.getPerpMarketAccount(0);
+      if (!market) {
+        throw new Error('SOL-PERP market account not loaded');
+      }
+      console.log('✅ Market account verified and loaded');
+    } catch (marketError) {
+      console.warn('⚠️ Market account verification failed:', marketError.message);
+      // Continue anyway - the client might still work for some operations
+    }
+    
+    console.log('✅ Drift client initialized successfully with account loader');
     
     return driftClient;
   } catch (error) {
@@ -119,12 +153,28 @@ async function createDriftClient(connection, walletAddress) {
 
 /**
  * DriftClient Cleanup Utility
- * Properly unsubscribes and cleans up DriftClient instances
+ * Properly unsubscribes and cleans up DriftClient instances and account loaders
  */
 async function cleanupDriftClient(driftClient) {
   try {
     if (driftClient) {
+      // Clean up the Drift client first
       await driftClient.unsubscribe();
+      
+      // Clean up the account loader if it exists
+      const accountSubscription = driftClient.accountSubscriber;
+      if (accountSubscription && accountSubscription.accountLoader) {
+        try {
+          // Stop polling and clean up the BulkAccountLoader
+          if (typeof accountSubscription.accountLoader.stopPolling === 'function') {
+            accountSubscription.accountLoader.stopPolling();
+          }
+          console.log('✅ Account loader cleaned up');
+        } catch (loaderError) {
+          console.warn('⚠️ Account loader cleanup warning:', loaderError.message);
+        }
+      }
+      
       console.log('✅ Drift client cleaned up successfully');
     }
   } catch (error) {
