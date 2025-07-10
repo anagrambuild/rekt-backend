@@ -1721,7 +1721,11 @@ this.logMessage('success', `📤 Trade instructions created: ${instructionsLen} 
                 throw new Error('No position ID provided');
             }
             
-            this.showTradeStatus('loading', 'Closing position...');
+            if (!this.isWalletConnected) {
+                throw new Error('Please connect your wallet first');
+            }
+            
+            this.showTradeStatus('loading', 'Preparing to close position...');
             
             // Get the position details to determine the market and direction
             const response = await fetch(`/api/markets/positions/${this.config.walletAddress}`);
@@ -1736,7 +1740,12 @@ this.logMessage('success', `📤 Trade instructions created: ${instructionsLen} 
                 throw new Error('Position not found');
             }
             
-            // Call the close position API
+            console.log(`🔒 Closing position:`, position);
+            this.logMessage('info', `🔒 Closing ${position.direction.toUpperCase()} position: ${position.size} SOL`);
+            
+            // Call the close position API to get transaction data
+            this.showTradeStatus('loading', 'Creating close position transaction...');
+            
             const closeResponse = await fetch('/api/trade/close', {
                 method: 'POST',
                 headers: {
@@ -1753,19 +1762,104 @@ this.logMessage('success', `📤 Trade instructions created: ${instructionsLen} 
             const result = await closeResponse.json();
             
             if (!result.success) {
-                throw new Error(result.error || 'Failed to close position');
+                throw new Error(result.error || 'Failed to create close position transaction');
             }
             
-            this.showTradeStatus('success', 'Position closed successfully!');
+            console.log('📦 Close position transaction data received:', result);
+            this.logMessage('info', `📦 Close transaction created: ${result.message}`);
             
-            // Refresh positions and balance
-            await Promise.all([
-                this.refreshPositions(),
-                this.fetchUSDCBalance()
-            ]);
+            // Build and sign the transaction
+            this.showTradeStatus('loading', 'Please sign the transaction in your wallet...');
+            
+            let transaction;
+            const { transactionData } = result;
+            
+            // Rebuild transaction from instructions
+            transaction = new window.solanaWeb3.Transaction({
+                recentBlockhash: transactionData.blockhash,
+                feePayer: new window.solanaWeb3.PublicKey(transactionData.feePayer)
+            });
+            
+            // Add all instructions
+            transactionData.instructions.forEach(instructionData => {
+                const keys = instructionData.keys.map(key => ({
+                    pubkey: new window.solanaWeb3.PublicKey(key.pubkey),
+                    isSigner: key.isSigner,
+                    isWritable: key.isWritable
+                }));
+                
+                const instruction = new window.solanaWeb3.TransactionInstruction({
+                    programId: new window.solanaWeb3.PublicKey(instructionData.programId),
+                    data: Uint8Array.from(atob(instructionData.data), c => c.charCodeAt(0)),
+                    keys: keys
+                });
+                
+                transaction.add(instruction);
+            });
+            
+            console.log('🖊️ Requesting wallet signature for close position...');
+            
+            // Sign the transaction
+            const signedTransaction = await window.solana.signTransaction(transaction);
+            
+            this.showTradeStatus('loading', 'Submitting close position transaction...');
+            
+            // Submit the transaction
+            const connection = new window.solanaWeb3.Connection(
+                'https://austbot-austbot-234b.mainnet.rpcpool.com/a30e04d0-d9d6-4ac1-8503-38217fdb2821',
+                'confirmed'
+            );
+            
+            const signature = await connection.sendRawTransaction(signedTransaction.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: 'confirmed'
+            });
+            
+            console.log('✅ Close position transaction submitted:', signature);
+            this.logMessage('success', `✅ Close position transaction submitted: ${signature}`);
+            
+            this.showTradeStatus('loading', 'Waiting for transaction confirmation...');
+            
+            // Wait for confirmation
+            const confirmation = await connection.confirmTransaction({
+                signature,
+                blockhash: transactionData.blockhash,
+                lastValidBlockHeight: transactionData.lastValidBlockHeight
+            }, 'confirmed');
+            
+            if (confirmation.value.err) {
+                throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+            }
+            
+            console.log('🎉 Position closed successfully!');
+            
+            // Check if withdrawal was included in the transaction
+            if (result.hasWithdrawal && result.withdrawAmount > 0) {
+                const withdrawAmount = result.withdrawAmount.toFixed(2);
+                this.showTradeStatus('success', `Position closed and ${withdrawAmount} USDC withdrawn to your wallet! TX: ${signature}`);
+                this.logMessage('success', `🎉 Position closed and ${withdrawAmount} USDC withdrawn! TX: ${signature}`);
+            } else {
+                this.showTradeStatus('success', `Position closed successfully! TX: ${signature}`);
+                this.logMessage('success', `🎉 Position closed! TX: ${signature}`);
+                
+                if (result.hasWithdrawal === false) {
+                    this.logMessage('info', '💰 No free collateral available for withdrawal');
+                }
+            }
+            
+            // Refresh positions and balance after successful close
+            setTimeout(async () => {
+                await Promise.all([
+                    this.refreshPositions(),
+                    this.fetchUSDCBalance()
+                ]);
+                this.logMessage('info', '🔄 Refreshed positions and balance after close');
+            }, 2000); // Wait 2 seconds for blockchain state to update
             
         } catch (error) {
+            console.error('❌ Close position error:', error);
             this.showTradeStatus('error', `Failed to close position: ${error.message}`);
+            this.logMessage('error', `❌ Close position failed: ${error.message}`);
         }
     }
     

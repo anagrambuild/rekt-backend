@@ -3,7 +3,7 @@ const cors = require('cors');
 const path = require('path');
 const { createServer } = require('http');
 const { WebSocketServer } = require('ws');
-const { Connection, PublicKey, Transaction } = require('@solana/web3.js');
+const { Connection, PublicKey, Transaction, ComputeBudgetProgram } = require('@solana/web3.js');
 const { 
   DriftClient, 
   initialize, 
@@ -538,7 +538,29 @@ app.post('/api/trade/submit', async (req, res) => {
           }
         }
         
-        console.log(`📊 Trade - Final total collateral: $${totalCollateral}`);
+        console.log(`📊 Trade - Final Drift account collateral: $${totalCollateral}`);
+        
+        // Also check user's wallet USDC balance since we can deposit as part of the trade
+        console.log('💰 Checking wallet USDC balance for additional collateral...');
+        let walletUsdcBalance = 0;
+        try {
+          const tokenAccounts = await connection.getTokenAccountsByOwner(
+            new PublicKey(walletAddress),
+            { mint: getUSDCMint() }
+          );
+          
+          if (tokenAccounts.value.length > 0) {
+            const accountInfo = await connection.getTokenAccountBalance(tokenAccounts.value[0].pubkey);
+            walletUsdcBalance = parseFloat(accountInfo.value.uiAmount || '0');
+            console.log(`💰 Wallet USDC balance: $${walletUsdcBalance}`);
+          }
+        } catch (error) {
+          console.log('💰 Could not fetch wallet USDC balance:', error.message);
+        }
+        
+        // Calculate total available collateral (Drift account + wallet)
+        const totalAvailableCollateral = totalCollateral + walletUsdcBalance;
+        console.log(`📊 Total available collateral (Drift + Wallet): $${totalAvailableCollateral}`);
         
         // Check if user has sufficient collateral for the trade (with safety buffer)
         // CORRECT calculation: Margin needed = Trade Amount / Leverage
@@ -546,15 +568,17 @@ app.post('/api/trade/submit', async (req, res) => {
         const safetyBuffer = 0.35; // 35% safety buffer for market volatility and real-time margin changes
         const totalMarginNeeded = baseMarginNeeded * (1 + safetyBuffer);
         
-        console.log(`📊 Collateral check: Trade=$${tradeAmount}, Leverage=${leverage}x, Base margin=$${baseMarginNeeded}, Safety buffer=${safetyBuffer*100}%, Total needed=$${totalMarginNeeded}, Available=$${totalCollateral}`);
+        console.log(`📊 Collateral check: Trade=$${tradeAmount}, Leverage=${leverage}x, Base margin=$${baseMarginNeeded}, Safety buffer=${safetyBuffer*100}%, Total needed=$${totalMarginNeeded}, Available=$${totalAvailableCollateral}`);
         
-        if (totalCollateral < totalMarginNeeded) {
-          console.log(`⚠️ Insufficient collateral (with safety buffer): Have $${totalCollateral}, need ~$${totalMarginNeeded}`);
+        if (totalAvailableCollateral < totalMarginNeeded) {
+          console.log(`⚠️ Insufficient total collateral (with safety buffer): Have $${totalAvailableCollateral}, need ~$${totalMarginNeeded}`);
           return res.status(400).json({
             success: false,
             error: 'Insufficient collateral',
-            message: `You have $${totalCollateral.toFixed(2)} but need approximately $${totalMarginNeeded.toFixed(2)} for this ${leverage}x leveraged trade (including 35% safety buffer). Please reduce the trade amount or add more collateral.`,
-            currentCollateral: totalCollateral,
+            message: `You have $${totalAvailableCollateral.toFixed(2)} total (Drift: $${totalCollateral.toFixed(2)} + Wallet: $${walletUsdcBalance.toFixed(2)}) but need approximately $${totalMarginNeeded.toFixed(2)} for this ${leverage}x leveraged trade (including 35% safety buffer). Please reduce the trade amount or add more USDC.`,
+            currentCollateral: totalAvailableCollateral,
+            driftCollateral: totalCollateral,
+            walletCollateral: walletUsdcBalance,
             requiredCollateral: totalMarginNeeded,
             safetyBuffer: safetyBuffer * 100
           });
@@ -740,6 +764,9 @@ app.post('/api/trade/close', async (req, res) => {
   try {
     const { walletAddress, market, direction, size } = req.body;
     
+    console.log(`🔒 Close position request:`, { walletAddress, market, direction, size });
+    
+    // Validate required parameters
     if (!walletAddress || !market || !direction || !size) {
       return res.status(400).json({
         success: false,
@@ -748,62 +775,422 @@ app.post('/api/trade/close', async (req, res) => {
       });
     }
     
-    console.log(`🔒 Closing position request:`, { walletAddress, market, direction, size });
+    // Validate wallet address
+    if (!validateWalletAddress(walletAddress)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid wallet address'
+      });
+    }
     
-    // Initialize Drift client
-
-
+    if (market !== 'SOL-PERP') {
+      return res.status(400).json({
+        success: false,
+        error: 'Unsupported market',
+        message: 'Only SOL-PERP market is currently supported'
+      });
+    }
     
-
+    // Apply rate limiting
+    await rpcRateLimit();
     
-    // Create a read-only Drift client
-    driftClient = new DriftClient({
-      connection,
-      wallet: {
-        publicKey: new PublicKey(walletAddress),
-        signTransaction: () => Promise.reject(new Error('Read-only client')),
-        signAllTransactions: () => Promise.reject(new Error('Read-only client'))
-      },
-      programID: getDriftProgramID(),
-      env: CLUSTER,
-      opts: {
-        commitment: 'confirmed',
-        skipPreflight: true,
-      },
-    });
+    // Set cluster for Drift client
+    const CLUSTER = process.env.DRIFT_CLUSTER || 'mainnet-beta';
     
-    // Initialize the client
-    await driftClient.subscribe();
+    // Create connection and Drift client using shared utilities
+    console.log('🔗 Connecting to Solana mainnet for position close...');
+    const connection = await createConnection();
+    const publicKey = new PublicKey(walletAddress);
     
-    // Get the market index from the market symbol (simplified)
-    const marketIndex = market.includes('SOL') ? 0 : 1; // Default to SOL-PERP if not recognized
-    
-    // Create a market order to close the position
-    // Note: In a real implementation, you would create and sign the transaction
-    // and return it to the client for signing and submission
-    
-    res.json({
-      success: true,
-      message: 'Position closed successfully',
-      txId: 'simulated-tx-id', // In a real implementation, this would be the actual transaction ID
-      timestamp: new Date().toISOString()
+    await retryWithBackoff(async () => {
+      // Initialize Drift client using shared utility
+      console.log('🌊 Initializing Drift client for close position...');
+      await initialize({ env: CLUSTER });
+      driftClient = await createDriftClient(connection, publicKey, CLUSTER);
+      
+      try {
+        // Get SOL-PERP market data
+        console.log('📊 Fetching SOL-PERP market data for close...');
+        let marketAcct = driftClient.getPerpMarketAccount(0);
+        if (!marketAcct) {
+          await driftClient.fetchAccounts();
+          marketAcct = driftClient.getPerpMarketAccount(0);
+          if (!marketAcct) {
+            throw new Error('SOL-PERP market not found');
+          }
+        }
+        
+        // Get current SOL price
+        console.log('💰 Fetching live SOL oracle price for close...');
+        const oraclePriceData = await driftClient.getOracleDataForPerpMarket(0);
+        const solPrice = oraclePriceData.price.toNumber() / PRICE_PRECISION.toNumber();
+        console.log(`💰 Current SOL price: $${solPrice.toFixed(2)}`);
+        
+        // Get user accounts
+        const userAccounts = await driftClient.getUserAccountsForAuthority(publicKey);
+        console.log(`✅ Found ${userAccounts.length} user accounts for close position`);
+        
+        const activeUserAccount = userAccounts.find(account => 
+          account.perpPositions?.some(pos => !pos.baseAssetAmount.isZero())
+        ) || userAccounts[0];
+        
+        if (!activeUserAccount) {
+          throw new Error('No Drift user account found for this wallet');
+        }
+        
+        console.log(`✅ Using subaccount ${activeUserAccount.subAccountId} for close`);
+        
+        // Create the opposite direction order to close the position
+        const closeDirection = direction.toLowerCase() === 'long' ? PositionDirection.SHORT : PositionDirection.LONG;
+        console.log(`🔄 Creating ${closeDirection === PositionDirection.SHORT ? 'SHORT' : 'LONG'} order to close ${direction.toUpperCase()} position`);
+        
+        // Convert size to proper base asset amount
+        const baseAssetAmount = driftClient.convertToPerpPrecision(parseFloat(size));
+        console.log(`📏 Position size to close: ${size} SOL (${baseAssetAmount.toString()} base units)`);
+        
+        // Create reduce-only market order to close position
+        const orderParams = {
+          orderType: OrderType.MARKET,
+          marketIndex: 0, // SOL-PERP
+          direction: closeDirection,
+          baseAssetAmount: baseAssetAmount,
+          reduceOnly: true, // Critical: This ensures we only close existing position
+        };
+        
+        console.log('🔨 Creating reduce-only order to close position...');
+        
+        // Create the order instruction
+        const orderInstruction = await driftClient.getPlacePerpOrderIx(orderParams);
+        console.log('✅ Order instruction created successfully');
+        
+        // Now create withdrawal instruction to automatically withdraw free collateral
+        console.log('💰 Creating withdrawal instruction for atomic close+withdraw...');
+        let withdrawIx = null;
+        let withdrawAmount = new BN(0);
+        
+        try {
+          // Get free collateral that can be withdrawn
+          const user = driftClient.getUser();
+          const freeCollateral = user.getFreeCollateral();
+          console.log(`💰 Free collateral available: ${freeCollateral.toString()}`);
+          
+          // Calculate safe withdrawal amount (90% of free collateral to leave buffer)
+          const safetyBuffer = 0.1; // 10% safety buffer
+          const maxWithdrawable = freeCollateral.mul(new BN(Math.floor((1 - safetyBuffer) * 1000))).div(new BN(1000));
+          
+          if (maxWithdrawable.gt(new BN(1000))) { // Only withdraw if > 0.001 USDC
+            // Get user's USDC token account
+            const usdcMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+            const tokenAccounts = await connection.getTokenAccountsByOwner(
+              new PublicKey(walletAddress),
+              { mint: usdcMint }
+            );
+            
+            if (tokenAccounts.value.length > 0) {
+              const userTokenAccount = tokenAccounts.value[0].pubkey;
+              withdrawAmount = maxWithdrawable;
+              
+              // Create withdrawal instruction
+              withdrawIx = await driftClient.getWithdrawIx(
+                withdrawAmount,
+                0, // USDC market index
+                userTokenAccount,
+                false, // reduceOnly
+                0 // subAccountId
+              );
+              
+              console.log(`💰 Withdrawal instruction created: ${withdrawAmount.div(new BN(1e6)).toString()} USDC`);
+            } else {
+              console.log('⚠️ No USDC token account found, skipping withdrawal');
+            }
+          } else {
+            console.log('⚠️ Insufficient free collateral for withdrawal, skipping');
+          }
+        } catch (withdrawError) {
+          console.log(`⚠️ Error creating withdrawal instruction: ${withdrawError.message}`);
+        }
+        
+        // Get recent blockhash and create transaction
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        
+        // Create compute budget instruction (increased for withdrawal)
+        const computeBudgetInstruction = ComputeBudgetProgram.setComputeUnitLimit({ units: withdrawIx ? 800_000 : 500_000 });
+        
+        // Serialize instructions for frontend
+        const instructions = [
+          {
+            programId: computeBudgetInstruction.programId.toString(),
+            data: Buffer.from(computeBudgetInstruction.data).toString('base64'),
+            keys: computeBudgetInstruction.keys.map(key => ({
+              pubkey: key.pubkey.toString(),
+              isSigner: key.isSigner,
+              isWritable: key.isWritable
+            }))
+          },
+          {
+            programId: orderInstruction.programId.toString(),
+            data: Buffer.from(orderInstruction.data).toString('base64'),
+            keys: orderInstruction.keys.map(key => ({
+              pubkey: key.pubkey.toString(),
+              isSigner: key.isSigner,
+              isWritable: key.isWritable
+            }))
+          }
+        ];
+        
+        // Add withdrawal instruction if created
+        if (withdrawIx) {
+          instructions.push({
+            programId: withdrawIx.programId.toString(),
+            data: Buffer.from(withdrawIx.data).toString('base64'),
+            keys: withdrawIx.keys.map(key => ({
+              pubkey: key.pubkey.toString(),
+              isSigner: key.isSigner,
+              isWritable: key.isWritable
+            }))
+          });
+        }
+        
+        const withdrawAmountUSDC = withdrawAmount.div(new BN(1e6)).toNumber();
+        const message = withdrawIx 
+          ? `Close ${direction.toUpperCase()} position and withdraw ${withdrawAmountUSDC.toFixed(2)} USDC to wallet (${size} SOL @ $${solPrice.toFixed(2)})` 
+          : `Close ${direction.toUpperCase()} position for ${market} (${size} SOL @ $${solPrice.toFixed(2)}) - No free collateral to withdraw`;
+        
+        res.json({
+          success: true,
+          transactionData: {
+            instructions: instructions,
+            blockhash,
+            lastValidBlockHeight,
+            feePayer: walletAddress
+          },
+          message: message,
+          solPrice: solPrice,
+          positionSize: size,
+          closeDirection: closeDirection === PositionDirection.SHORT ? 'SHORT' : 'LONG',
+          withdrawAmount: withdrawAmountUSDC,
+          hasWithdrawal: !!withdrawIx
+        });
+        
+      } finally {
+        try {
+          await driftClient.unsubscribe();
+          console.log('✅ Drift client unsubscribed after close position');
+        } catch (error) {
+          console.warn('⚠️ Error unsubscribing Drift client:', error.message);
+        }
+      }
     });
     
   } catch (error) {
-    console.error('Error closing position:', error);
+    console.error('❌ Close position error:', {
+      message: error.message,
+      stack: error.stack,
+      requestBody: req.body
+    });
+    
     res.status(500).json({
       success: false,
       error: 'Failed to close position',
-      message: error.message
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
-  } finally {
-    if (driftClient) {
-      try {
-        await driftClient.unsubscribe();
-      } catch (e) {
-        console.error('Error unsubscribing Drift client:', e);
-      }
+  }
+});
+
+// Withdrawal endpoint - Withdraw USDC from Drift to user's wallet
+app.post('/api/trade/withdraw', async (req, res) => {
+  let driftClient;
+  try {
+    const { walletAddress, amount } = req.body;
+    
+    console.log(`💸 Withdrawal request:`, { walletAddress, amount });
+    
+    // Validate required parameters
+    if (!walletAddress) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: walletAddress'
+      });
     }
+    
+    // Validate wallet address
+    if (!validateWalletAddress(walletAddress)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid wallet address'
+      });
+    }
+    
+    // Apply rate limiting
+    await rpcRateLimit();
+    
+    // Set cluster for Drift client
+    const CLUSTER = process.env.DRIFT_CLUSTER || 'mainnet-beta';
+    
+    // Create connection and Drift client using shared utilities
+    console.log('🔗 Connecting to Solana mainnet for withdrawal...');
+    const connection = await createConnection();
+    const publicKey = new PublicKey(walletAddress);
+    
+    await retryWithBackoff(async () => {
+      // Initialize Drift client using shared utility
+      console.log('🌊 Initializing Drift client for withdrawal...');
+      await initialize({ env: CLUSTER });
+      driftClient = await createDriftClient(connection, publicKey, CLUSTER);
+      
+      try {
+        // Get user's USDC balance and calculate free collateral
+        console.log('💰 Getting user USDC balance for withdrawal...');
+        const userAccount = await driftClient.getUserAccount();
+        const usdcSpotPosition = userAccount.spotPositions.find(pos => pos.marketIndex === 0);
+        
+        if (!usdcSpotPosition || usdcSpotPosition.scaledBalance.isZero()) {
+          return res.status(400).json({
+            success: false,
+            error: 'No USDC balance available for withdrawal'
+          });
+        }
+        
+        // Get total collateral and free collateral
+        const user = driftClient.getUser();
+        const totalCollateral = user.getTotalCollateral();
+        const freeCollateral = user.getFreeCollateral();
+        
+        console.log(`💰 Total collateral: ${totalCollateral.toString()}`);
+        console.log(`💰 Free collateral: ${freeCollateral.toString()}`);
+        
+        // Calculate safe withdrawal amount (90% of free collateral to leave buffer)
+        const safetyBuffer = 0.1; // 10% safety buffer
+        const maxWithdrawable = freeCollateral.mul(new BN(Math.floor((1 - safetyBuffer) * 1000))).div(new BN(1000));
+        
+        if (maxWithdrawable.isZero() || maxWithdrawable.lt(new BN(1000))) { // Less than 0.001 USDC
+          return res.status(400).json({
+            success: false,
+            error: 'Insufficient free collateral for withdrawal',
+            message: 'No withdrawable collateral available. Close positions to free up collateral for withdrawal.',
+            totalCollateral: totalCollateral.toNumber() / 1e6,
+            freeCollateral: freeCollateral.toNumber() / 1e6
+          });
+        }
+        
+        // Determine withdrawal amount
+        const withdrawAmount = amount ? new BN(amount * 1e6) : maxWithdrawable;
+        
+        console.log(`💰 Available balance: ${usdcSpotPosition.scaledBalance.toString()}`);
+        console.log(`💰 Max withdrawable: ${maxWithdrawable.toString()}`);
+        console.log(`💰 Withdrawing amount: ${withdrawAmount.toString()}`);
+        
+        if (withdrawAmount.gt(maxWithdrawable)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Insufficient free collateral for withdrawal',
+            message: `Requested ${withdrawAmount.div(new BN(1e6)).toString()} USDC but only ${maxWithdrawable.div(new BN(1e6)).toString()} is available for withdrawal`,
+            totalCollateral: totalCollateral.toNumber() / 1e6,
+            freeCollateral: freeCollateral.toNumber() / 1e6,
+            maxWithdrawable: maxWithdrawable.toNumber() / 1e6
+          });
+        }
+        
+        // Get user's USDC token account
+        const usdcMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+        const tokenAccounts = await connection.getTokenAccountsByOwner(
+          new PublicKey(walletAddress),
+          { mint: usdcMint }
+        );
+        
+        if (tokenAccounts.value.length === 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'No USDC token account found',
+            message: 'Please create a USDC token account first'
+          });
+        }
+        
+        const userTokenAccount = tokenAccounts.value[0].pubkey;
+        console.log(`💰 User token account: ${userTokenAccount.toString()}`);
+        
+        // Create withdrawal instruction
+        console.log('🔨 Creating withdrawal instruction...');
+        const withdrawIx = await driftClient.getWithdrawIx(
+          withdrawAmount,
+          0, // USDC market index
+          userTokenAccount,
+          false, // reduceOnly
+          0 // subAccountId
+        );
+        
+        console.log('✅ Withdrawal instruction created successfully');
+        
+        // Get latest blockhash for transaction
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        
+        // Add compute budget instruction for reliability
+        const computeBudgetInstruction = ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 });
+        
+        // Serialize instructions for frontend
+        const instructions = [
+          {
+            programId: computeBudgetInstruction.programId.toString(),
+            data: Buffer.from(computeBudgetInstruction.data).toString('base64'),
+            keys: computeBudgetInstruction.keys.map(key => ({
+              pubkey: key.pubkey.toString(),
+              isSigner: key.isSigner,
+              isWritable: key.isWritable
+            }))
+          },
+          {
+            programId: withdrawIx.programId.toString(),
+            data: Buffer.from(withdrawIx.data).toString('base64'),
+            keys: withdrawIx.keys.map(key => ({
+              pubkey: key.pubkey.toString(),
+              isSigner: key.isSigner,
+              isWritable: key.isWritable
+            }))
+          }
+        ];
+        
+        const usdcBalance = usdcSpotPosition.scaledBalance.toNumber() / 1e6; // Convert to USDC (6 decimals)
+        const withdrawingAmount = withdrawAmount.toNumber() / 1e6;
+        
+        console.log(`💰 Created withdrawal transaction: ${withdrawingAmount} USDC`);
+        
+        res.json({
+          success: true,
+          message: `Withdrawal transaction created for ${withdrawingAmount.toFixed(2)} USDC`,
+          transactionData: {
+            instructions,
+            blockhash,
+            lastValidBlockHeight,
+            feePayer: walletAddress
+          },
+          availableBalance: usdcBalance,
+          withdrawingAmount: withdrawingAmount
+        });
+        
+      } finally {
+        try {
+          await driftClient.unsubscribe();
+          console.log('✅ Drift client unsubscribed after withdrawal');
+        } catch (error) {
+          console.warn('⚠️ Error unsubscribing Drift client:', error.message);
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Withdrawal error:', {
+      message: error.message,
+      stack: error.stack,
+      requestBody: req.body
+    });
+    
+    res.status(500).json({
+      success: false,
+      error: 'Failed to process withdrawal',
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
@@ -899,6 +1286,7 @@ try {
             markPrice = parseFloat(oracleData.price.toString()) / 1e6; // PRICE_PRECISION is 1e6
           } catch (e) {
             console.warn(`Could not fetch mark price for market ${pos.marketIndex}:`, e.message);
+            markPrice = 150; // Default fallback price
           }
           
           // Calculate position size in base asset units (e.g., SOL)
@@ -911,7 +1299,8 @@ try {
           const avgEntryPrice = baseEntry !== 0 ? Math.abs(quoteEntry / baseEntry) : 0;
           
           // Calculate unrealized PnL
-          const isLong = pos.baseAssetAmount.gt(0);
+          const baseAssetAmountBN = new BN(pos.baseAssetAmount.toString());
+          const isLong = baseAssetAmountBN.gt(new BN(0));
           let unrealizedPnl = 0;
           let pnlPercentage = 0;
           
@@ -1018,7 +1407,14 @@ try {
             quoteEntryAmount: pos.quoteEntryAmount ? pos.quoteEntryAmount.toString() : '0'
           };
         } catch (error) {
-          console.error('Error processing position:', error.message);
+          console.error('❌ Error processing position:', error.message);
+          console.error('   Error stack:', error.stack);
+          console.error('   Position data:', {
+            marketIndex: pos?.marketIndex,
+            baseAssetAmount: pos?.baseAssetAmount?.toString(),
+            quoteAssetAmount: pos?.quoteAssetAmount?.toString(),
+            quoteEntryAmount: pos?.quoteEntryAmount?.toString()
+          });
           return null;
         }
       })
@@ -1111,6 +1507,7 @@ async function fetchPositionsForWallet(walletAddress) {
             markPrice = parseFloat(oracleData.price.toString()) / 1e6; // PRICE_PRECISION is 1e6
           } catch (e) {
             console.warn(`Could not fetch mark price for market ${pos.marketIndex}:`, e.message);
+            markPrice = 150; // Default fallback price
           }
           
           // Calculate position size in base asset units (e.g., SOL)
@@ -1122,7 +1519,8 @@ async function fetchPositionsForWallet(walletAddress) {
           const avgEntryPrice = baseEntry !== 0 ? Math.abs(quoteEntry / baseEntry) : 0;
           
           // Calculate unrealized PnL
-          const isLong = pos.baseAssetAmount.gt(0);
+          const baseAssetAmountBN = new BN(pos.baseAssetAmount.toString());
+          const isLong = baseAssetAmountBN.gt(new BN(0));
           let unrealizedPnl = 0;
           let pnlPercentage = 0;
           
@@ -1233,7 +1631,14 @@ async function fetchPositionsForWallet(walletAddress) {
             quoteEntryAmount: pos.quoteEntryAmount ? pos.quoteEntryAmount.toString() : '0'
           };
         } catch (error) {
-          console.error('Error processing position:', error.message);
+          console.error('❌ Error processing position:', error.message);
+          console.error('   Error stack:', error.stack);
+          console.error('   Position data:', {
+            marketIndex: pos?.marketIndex,
+            baseAssetAmount: pos?.baseAssetAmount?.toString(),
+            quoteAssetAmount: pos?.quoteAssetAmount?.toString(),
+            quoteEntryAmount: pos?.quoteEntryAmount?.toString()
+          });
           return null;
         }
       })
