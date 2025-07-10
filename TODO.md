@@ -37,3 +37,4 @@
 - Breeze wallet integration
 - Social features (leaderboard, copy trading)
 - Comprehensive test suite (unit, integration, E2E)
+- Need to show historical trades

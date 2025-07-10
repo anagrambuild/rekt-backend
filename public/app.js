@@ -1083,7 +1083,8 @@ class DriftAPIInterface {
             }
             
             if (!marginCalc.canExecuteTrade) {
-                throw new Error('Insufficient margin for this trade. Please reduce position size or add more collateral.');
+                this.logMessage('warning', `⚠️ Insufficient margin detected - Available: $${marginCalc.currentCollateral}, Required: $${marginCalc.marginRequired}`);
+                this.logMessage('info', `ℹ️ Attempting trade submission - backend will validate final margin requirements`);
             }
             
             // Step 2: Validate and prepare trade
