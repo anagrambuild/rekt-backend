@@ -1802,11 +1802,14 @@ app.post("/api/trade/close", async (req, res) => {
       });
     }
 
-    if (market !== "SOL-PERP") {
+    // Validate market symbol against supported markets
+    if (!SUPPORTED_MARKETS.hasOwnProperty(market)) {
       return res.status(400).json({
         success: false,
         error: "Unsupported market",
-        message: "Only SOL-PERP market is currently supported",
+        message: `Market ${market} is not supported. Supported markets: ${Object.keys(
+          SUPPORTED_MARKETS
+        ).join(", ")}`,
       });
     }
 
@@ -1827,23 +1830,29 @@ app.post("/api/trade/close", async (req, res) => {
     driftClient = await createDriftClient(connection, publicKey, CLUSTER);
 
     try {
-      // Get SOL-PERP market data
-      console.log("📊 Fetching SOL-PERP market data for close...");
-      let marketAcct = driftClient.getPerpMarketAccount(0);
+      // Get market index from supported markets
+      const marketIndex = SUPPORTED_MARKETS[market];
+      console.log(
+        `📊 Fetching ${market} market data for close (index: ${marketIndex})...`
+      );
+
+      let marketAcct = driftClient.getPerpMarketAccount(marketIndex);
       if (!marketAcct) {
         await driftClient.fetchAccounts();
-        marketAcct = driftClient.getPerpMarketAccount(0);
+        marketAcct = driftClient.getPerpMarketAccount(marketIndex);
         if (!marketAcct) {
-          throw new Error("SOL-PERP market not found");
+          throw new Error(`${market} market not found`);
         }
       }
 
-      // Get current SOL price
-      console.log("💰 Fetching live SOL oracle price for close...");
-      const oraclePriceData = await driftClient.getOracleDataForPerpMarket(0);
-      const solPrice =
+      // Get current market price
+      console.log(`💰 Fetching live ${market} oracle price for close...`);
+      const oraclePriceData = await driftClient.getOracleDataForPerpMarket(
+        marketIndex
+      );
+      const currentPrice =
         oraclePriceData.price.toNumber() / PRICE_PRECISION.toNumber();
-      console.log(`💰 Current SOL price: $${solPrice.toFixed(2)}`);
+      console.log(`💰 Current ${market} price: $${currentPrice.toFixed(2)}`);
 
       // Get user accounts
       const userAccounts = await driftClient.getUserAccountsForAuthority(
@@ -1882,13 +1891,16 @@ app.post("/api/trade/close", async (req, res) => {
         parseFloat(size)
       );
       console.log(
-        `📏 Position size to close: ${size} SOL (${baseAssetAmount.toString()} base units)`
+        `📏 Position size to close: ${size} ${market.replace(
+          "-PERP",
+          ""
+        )} (${baseAssetAmount.toString()} base units)`
       );
 
       // Create reduce-only market order to close position
       const orderParams = {
         orderType: OrderType.MARKET,
-        marketIndex: 0, // SOL-PERP
+        marketIndex: marketIndex, // Use dynamic market index
         direction: closeDirection,
         baseAssetAmount: baseAssetAmount,
         reduceOnly: true, // Critical: This ensures we only close existing position
@@ -2013,24 +2025,27 @@ app.post("/api/trade/close", async (req, res) => {
       }
 
       const withdrawAmountUSDC = withdrawAmount.div(new BN(1e6)).toNumber();
+      const assetSymbol = market.replace("-PERP", "");
       const message = withdrawIx
         ? `Close ${direction.toUpperCase()} position and withdraw ${withdrawAmountUSDC.toFixed(
             2
-          )} USDC to wallet (${size} SOL @ $${solPrice.toFixed(2)})`
-        : `Close ${direction.toUpperCase()} position for ${market} (${size} SOL @ $${solPrice.toFixed(
+          )} USDC to wallet (${size} ${assetSymbol} @ $${currentPrice.toFixed(
+            2
+          )})`
+        : `Close ${direction.toUpperCase()} position for ${market} (${size} ${assetSymbol} @ $${currentPrice.toFixed(
             2
           )}) - No free collateral to withdraw`;
 
       res.json({
         success: true,
         transactionData: {
-          instructions: instructions,
+          instructions,
           blockhash,
           lastValidBlockHeight,
           feePayer: walletAddress,
         },
         message: message,
-        solPrice: solPrice,
+        currentPrice: currentPrice,
         positionSize: size,
         closeDirection:
           closeDirection === PositionDirection.SHORT ? "SHORT" : "LONG",
@@ -3264,11 +3279,48 @@ function startPriceUpdates() {
       return;
     }
 
-    console.log(`📊 Broadcasting real-time data for ${markets.length} markets`);
+    console.log(`📊 Broadcasting price data for ${markets.length} markets`);
 
-    // Broadcast to all clients with personalized data
+    // Broadcast market data to all clients
     const activeClients = [];
+
+    for (const ws of connectedClients) {
+      if (ws.readyState !== ws.OPEN) {
+        connectedClients.delete(ws);
+        if (clientWallets.has(ws)) {
+          clientWallets.delete(ws);
+        }
+        continue;
+      }
+
+      activeClients.push(ws);
+
+      // Send market data to all clients
+      ws.send(
+        JSON.stringify({
+          type: "price_update",
+          data: markets,
+          timestamp: new Date().toISOString(),
+        })
+      );
+    }
+
+    console.log(`📊 Price updates sent to ${activeClients.length} clients`);
+  }, WEBSOCKET_CONFIG.PRICE_UPDATE_INTERVAL);
+
+  // Return interval for potential cleanup
+  return priceUpdateInterval;
+}
+
+// Dedicated position update function
+function startPositionUpdates() {
+  const positionUpdateInterval = setInterval(async () => {
+    if (connectedClients.size === 0) return;
+
+    console.log("🔄 Fetching position updates for connected wallets...");
+
     const walletsWithPositions = new Set();
+    const activeClients = [];
 
     for (const ws of connectedClients) {
       if (ws.readyState !== ws.OPEN) {
@@ -3291,11 +3343,10 @@ function startPriceUpdates() {
         try {
           const positions = await fetchPositionsForWallet(walletAddress);
 
-          // Send combined market + position data
+          // Send position-only update
           ws.send(
             JSON.stringify({
-              type: "market_and_position_update",
-              markets: markets,
+              type: "position_update",
               positions: positions,
               walletAddress: walletAddress,
               timestamp: new Date().toISOString(),
@@ -3306,41 +3357,66 @@ function startPriceUpdates() {
             `Error fetching positions for ${walletAddress}:`,
             error.message
           );
-          // Send just market data if position fetch fails
-          ws.send(
-            JSON.stringify({
-              type: "price_update",
-              data: markets,
-              timestamp: new Date().toISOString(),
-            })
-          );
         }
-      } else {
-        // Send just market data for clients without registered wallets
+      }
+    }
+
+    if (walletsWithPositions.size > 0) {
+      console.log(
+        `📊 Position updates sent for ${walletsWithPositions.size} wallets`
+      );
+    }
+  }, WEBSOCKET_CONFIG.POSITION_UPDATE_INTERVAL);
+
+  // Return interval for potential cleanup
+  return positionUpdateInterval;
+}
+
+// Function to send immediate position update for a specific wallet
+async function sendImmediatePositionUpdate(walletAddress) {
+  if (!walletAddress) return;
+
+  console.log(`⚡ Sending immediate position update for ${walletAddress}`);
+
+  try {
+    const positions = await fetchPositionsForWallet(walletAddress);
+
+    // Find all clients with this wallet registered
+    for (const ws of connectedClients) {
+      if (
+        ws.readyState === ws.OPEN &&
+        clientWallets.get(ws) === walletAddress
+      ) {
         ws.send(
           JSON.stringify({
-            type: "price_update",
-            data: markets,
+            type: "position_update",
+            positions: positions,
+            walletAddress: walletAddress,
             timestamp: new Date().toISOString(),
+            immediate: true,
           })
         );
       }
     }
-
-    const positionClients = walletsWithPositions.size;
-    console.log(
-      `📊 Updates sent to ${activeClients.length} clients (${positionClients} with positions)`
+  } catch (error) {
+    console.error(
+      `Error sending immediate position update for ${walletAddress}:`,
+      error.message
     );
-  }, 5000); // Update every 5 seconds
-
-  // Return interval for potential cleanup
-  return priceUpdateInterval;
+  }
 }
+
+// TODO: Future Enhancement - Event-Driven Updates
+// Instead of polling every 3 seconds, we could:
+// 1. Subscribe to Drift Protocol account changes via WebSocket
+// 2. Listen for Solana account updates using connection.onAccountChange()
+// 3. Trigger position updates only when actual changes occur
+// This would provide true real-time updates (sub-second) while reducing unnecessary API calls
 
 // Handle transaction submission from frontend
 app.post("/api/transaction/submit", async (req, res) => {
   try {
-    const { signedTransaction } = req.body;
+    const { signedTransaction, walletAddress } = req.body;
 
     if (!signedTransaction) {
       return res.status(400).json({
@@ -3377,6 +3453,20 @@ app.post("/api/transaction/submit", async (req, res) => {
       });
 
       console.log("🎉 Transaction confirmed:", confirmation);
+
+      // Send immediate position update if wallet address provided
+      if (walletAddress) {
+        console.log(
+          `⚡ Triggering immediate position update for ${walletAddress}`
+        );
+        // Don't await this to avoid delaying the response
+        sendImmediatePositionUpdate(walletAddress).catch((error) => {
+          console.error(
+            "Error sending immediate position update:",
+            error.message
+          );
+        });
+      }
 
       return res.json({
         success: true,
@@ -3522,6 +3612,7 @@ server.listen(PORT, async () => {
     console.error('   Connection status will show "Disconnected"');
   }
 
-  // Start real-time price updates after server is ready
+  // Start real-time updates after server is ready
   startPriceUpdates();
+  startPositionUpdates();
 });

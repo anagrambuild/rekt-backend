@@ -184,6 +184,52 @@
                 Toggle between High Leverage Mode (1x-100x) and Legacy Mode
                 (1x-20x with fallback)
               </div>
+
+              <!-- Position Auto-Refresh Control -->
+              <div
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 15px;
+                  margin-top: 15px;
+                  padding-top: 15px;
+                  border-top: 1px solid #444;
+                "
+              >
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    cursor: pointer;
+                  "
+                >
+                  <input
+                    type="checkbox"
+                    id="auto-refresh-toggle"
+                    checked
+                    style="transform: scale(1.2)"
+                  />
+                  <span>Auto-refresh Positions (3s)</span>
+                </label>
+                <div
+                  id="position-update-status"
+                  style="
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    background: #28a745;
+                    color: white;
+                    font-weight: bold;
+                  "
+                >
+                  AUTO-REFRESH ON
+                </div>
+              </div>
+              <div style="font-size: 12px; color: #888; margin-top: 8px">
+                Automatic position updates via WebSocket (immediate after
+                trades)
+              </div>
             </div>
 
             <div

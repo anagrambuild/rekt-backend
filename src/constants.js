@@ -27,10 +27,9 @@ const COMPUTE_UNITS = {
 
 // Rate Limiting Configuration
 const RPC_CONFIG = {
-  MIN_INTERVAL: 1000, // 1 second between calls
-  MAX_RETRIES: 5,
-  INITIAL_RETRY_DELAY: 1000,
-  MAX_RETRY_DELAY: 10000,
+  MIN_INTERVAL: 500, // 500ms between calls (2x faster)
+  MAX_RETRIES: 3,
+  TIMEOUT: 30000, // 30 seconds
 };
 
 // Safety Buffers
@@ -42,8 +41,8 @@ const SAFETY_BUFFERS = {
 
 // WebSocket Configuration
 const WEBSOCKET_CONFIG = {
-  PRICE_UPDATE_INTERVAL: 5000, // 5 seconds
-  POSITION_UPDATE_INTERVAL: 15000, // 15 seconds
+  PRICE_UPDATE_INTERVAL: 3000, // 3 seconds (faster price updates)
+  POSITION_UPDATE_INTERVAL: 3000, // 3 seconds (much faster position updates)
   HEARTBEAT_INTERVAL: 30000, // 30 seconds
 };
 

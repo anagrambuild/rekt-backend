@@ -212,6 +212,14 @@ class DriftAPIInterface {
       );
     }
 
+    // Initialize auto-refresh toggle
+    const autoRefreshToggle = document.getElementById("auto-refresh-toggle");
+    if (autoRefreshToggle) {
+      autoRefreshToggle.addEventListener("change", (e) =>
+        this.toggleAutoRefresh(e.target.checked)
+      );
+    }
+
     console.log("✅ Trading interface initialized");
   }
 
@@ -318,8 +326,15 @@ class DriftAPIInterface {
           `✨ Markets + Positions updated: ${message.markets.length} markets, ${message.positions.length} positions (${timestamp})`
         );
       } else if (message.type === "position_update") {
-        // Handle position updates from WebSocket (legacy support)
-        this.handleWebSocketPositionUpdate(message.data, message.walletAddress);
+        // Handle position updates from WebSocket (supports both legacy and new format)
+        const positions = message.positions || message.data; // New format uses 'positions', legacy uses 'data'
+        const walletAddress = message.walletAddress;
+
+        if (message.immediate) {
+          console.log("⚡ Received immediate position update after trade");
+        }
+
+        this.handleWebSocketPositionUpdate(positions, walletAddress);
       } else if (message.type === "connected") {
         this.logMessage("success", `🟢 ${message.message}`);
         // Register wallet immediately if one is connected
@@ -1606,6 +1621,7 @@ class DriftAPIInterface {
         },
         body: JSON.stringify({
           signedTransaction: signedTransactionBase64,
+          walletAddress: this.config.walletAddress, // Include wallet address for position updates
         }),
       });
 
@@ -2503,6 +2519,14 @@ class DriftAPIInterface {
         return;
       }
 
+      // Check if auto-refresh is enabled (default to true if not set)
+      const autoRefreshEnabled = this.config.autoRefreshEnabled !== false;
+
+      if (!autoRefreshEnabled) {
+        console.log("🔄 Position update received but auto-refresh is disabled");
+        return;
+      }
+
       // Track last update time for optimization
       this.config.lastPositionUpdate = Date.now();
 
@@ -2714,6 +2738,34 @@ class DriftAPIInterface {
     if (adminPanel) {
       adminPanel.style.display = "block";
       this.fetchFeatureFlags(); // Load current settings
+    }
+  }
+
+  toggleAutoRefresh(enabled) {
+    this.config.autoRefreshEnabled = enabled;
+
+    const statusDisplay = document.getElementById("position-update-status");
+    if (statusDisplay) {
+      if (enabled) {
+        statusDisplay.textContent = "AUTO-REFRESH ON";
+        statusDisplay.style.background = "#28a745"; // Green
+      } else {
+        statusDisplay.textContent = "AUTO-REFRESH OFF";
+        statusDisplay.style.background = "#dc3545"; // Red
+      }
+    }
+
+    this.logMessage(
+      "info",
+      `🔄 Position auto-refresh ${enabled ? "enabled" : "disabled"}`
+    );
+
+    // If disabled, user will need to manually refresh
+    if (!enabled) {
+      this.logMessage(
+        "info",
+        "💡 Use the refresh button to update positions manually"
+      );
     }
   }
 }
