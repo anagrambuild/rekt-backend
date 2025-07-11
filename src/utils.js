@@ -1,16 +1,21 @@
 // Production-Ready Shared Utilities - Phase B
 // This file contains reusable utility functions to eliminate code duplication
 
-const { Connection, PublicKey, Transaction, ComputeBudgetProgram } = require('@solana/web3.js');
-const { DriftClient, initialize, Wallet, BN } = require('@drift-labs/sdk');
-const { 
-  SOLANA_MAINNET_RPC, 
-  DRIFT_CLUSTER, 
-  USDC_MINT_ADDRESS, 
+const {
+  Connection,
+  PublicKey,
+  Transaction,
+  ComputeBudgetProgram,
+} = require("@solana/web3.js");
+const { DriftClient, initialize, Wallet, BN } = require("@drift-labs/sdk");
+const {
+  SOLANA_MAINNET_RPC,
+  DRIFT_CLUSTER,
+  USDC_MINT_ADDRESS,
   DRIFT_PROGRAM_ID_ADDRESS,
   RPC_CONFIG,
-  COMPUTE_UNITS 
-} = require('./constants');
+  COMPUTE_UNITS,
+} = require("./constants");
 
 // RPC Rate limiting state
 let lastRpcCall = 0;
@@ -22,13 +27,13 @@ let lastRpcCall = 0;
 async function rpcRateLimit() {
   const now = Date.now();
   const timeSinceLastCall = now - lastRpcCall;
-  
+
   if (timeSinceLastCall < RPC_CONFIG.MIN_INTERVAL) {
     const waitTime = RPC_CONFIG.MIN_INTERVAL - timeSinceLastCall;
     console.log(`⏱️ Rate limiting: waiting ${waitTime}ms before next RPC call`);
-    await new Promise(resolve => setTimeout(resolve, waitTime));
+    await new Promise((resolve) => setTimeout(resolve, waitTime));
   }
-  
+
   lastRpcCall = Date.now();
 }
 
@@ -44,10 +49,13 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
       if (attempt === maxRetries) {
         throw error; // Re-throw on final attempt
       }
-      
+
       const delay = baseDelay * Math.pow(2, attempt - 1);
-      console.log(`⚠️ Attempt ${attempt} failed, retrying in ${delay}ms:`, error.message);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      console.log(
+        `⚠️ Attempt ${attempt} failed, retrying in ${delay}ms:`,
+        error.message
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 }
@@ -59,28 +67,39 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
 async function createConnection(retryCount = 0) {
   try {
     await rpcRateLimit();
-    
+
     const connection = new Connection(SOLANA_MAINNET_RPC, {
-      commitment: 'confirmed',
-      confirmTransactionInitialTimeout: 60000
+      commitment: "confirmed",
+      confirmTransactionInitialTimeout: 60000,
     });
-    
-    // Test connection
-    await connection.getLatestBlockhash('confirmed');
-    console.log('✅ Connection established successfully');
-    
+
+    // Test connection with timeout
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Connection timeout")), 30000)
+    );
+
+    await Promise.race([
+      connection.getLatestBlockhash("confirmed"),
+      timeoutPromise,
+    ]);
+
+    console.log("✅ Connection established successfully");
     return connection;
   } catch (error) {
-    console.error(`❌ Connection failed (attempt ${retryCount + 1}):`, error.message);
-    
-    if (retryCount < RPC_CONFIG.MAX_RETRIES) {
-      const delay = Math.min(RPC_CONFIG.INITIAL_RETRY_DELAY * Math.pow(2, retryCount), RPC_CONFIG.MAX_RETRY_DELAY);
+    console.error(
+      `❌ Connection failed (attempt ${retryCount + 1}):`,
+      error.message
+    );
+
+    // Only retry up to 2 times, then fail
+    if (retryCount < 2) {
+      const delay = 2000; // Fixed 2 second delay
       console.log(`🔄 Retrying in ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      await new Promise((resolve) => setTimeout(resolve, delay));
       return createConnection(retryCount + 1);
     }
-    
-    throw new Error(`Failed to establish connection after ${RPC_CONFIG.MAX_RETRIES} attempts: ${error.message}`);
+
+    throw new Error(`RPC connection failed: ${error.message}`);
   }
 }
 
@@ -90,63 +109,66 @@ async function createConnection(retryCount = 0) {
  */
 async function createDriftClient(connection, walletAddress) {
   try {
-    console.log('🔄 Initializing Drift client...');
-    
+    console.log("🔄 Initializing Drift client...");
+
     // Create read-only wallet for backend operations (matches server.js createReadOnlyWallet)
     const walletPubkey = new PublicKey(walletAddress);
     const wallet = {
       publicKey: walletPubkey,
-      signTransaction: () => Promise.reject(new Error('Read-only client')),
-      signAllTransactions: () => Promise.reject(new Error('Read-only client'))
+      signTransaction: () => Promise.reject(new Error("Read-only client")),
+      signAllTransactions: () => Promise.reject(new Error("Read-only client")),
     };
-    
+
     // Import BulkAccountLoader from the SDK
-    const { BulkAccountLoader } = require('@drift-labs/sdk');
-    
+    const { BulkAccountLoader } = require("@drift-labs/sdk");
+
     // Create BulkAccountLoader with optimized settings for margin calculations
     const bulkAccountLoader = new BulkAccountLoader(
       connection,
-      'confirmed', // Use 'confirmed' commitment for balance between speed and reliability
+      "confirmed", // Use 'confirmed' commitment for balance between speed and reliability
       1000 // Poll every 1000ms for fresh data
     );
-    
-    console.log('📦 Setting up account subscription with BulkAccountLoader...');
-    
+
+    console.log("📦 Setting up account subscription with BulkAccountLoader...");
+
     // Initialize Drift client with proper account subscription
     const driftClient = new DriftClient({
       connection,
       wallet,
       env: DRIFT_CLUSTER,
       accountSubscription: {
-        type: 'polling',
+        type: "polling",
         accountLoader: bulkAccountLoader,
       },
     });
-    
-    console.log('🔔 Subscribing to Drift client...');
+
+    console.log("🔔 Subscribing to Drift client...");
     await driftClient.subscribe();
-    
+
     // Wait for initial account data to be loaded
-    console.log('⏳ Waiting for account data to load...');
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
+    console.log("⏳ Waiting for account data to load...");
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
     // Verify that market accounts are accessible
     try {
       const market = driftClient.getPerpMarketAccount(0);
       if (!market) {
-        throw new Error('SOL-PERP market account not loaded');
+        throw new Error("SOL-PERP market account not loaded");
       }
-      console.log('✅ Market account verified and loaded');
+      console.log("✅ Market account verified and loaded");
     } catch (marketError) {
-      console.warn('⚠️ Market account verification failed:', marketError.message);
+      console.warn(
+        "⚠️ Market account verification failed:",
+        marketError.message
+      );
       // Continue anyway - the client might still work for some operations
     }
-    
-    console.log('✅ Drift client initialized successfully with account loader');
-    
+
+    console.log("✅ Drift client initialized successfully with account loader");
+
     return driftClient;
   } catch (error) {
-    console.error('❌ Failed to initialize Drift client:', error.message);
+    console.error("❌ Failed to initialize Drift client:", error.message);
     throw error;
   }
 }
@@ -160,25 +182,30 @@ async function cleanupDriftClient(driftClient) {
     if (driftClient) {
       // Clean up the Drift client first
       await driftClient.unsubscribe();
-      
+
       // Clean up the account loader if it exists
       const accountSubscription = driftClient.accountSubscriber;
       if (accountSubscription && accountSubscription.accountLoader) {
         try {
           // Stop polling and clean up the BulkAccountLoader
-          if (typeof accountSubscription.accountLoader.stopPolling === 'function') {
+          if (
+            typeof accountSubscription.accountLoader.stopPolling === "function"
+          ) {
             accountSubscription.accountLoader.stopPolling();
           }
-          console.log('✅ Account loader cleaned up');
+          console.log("✅ Account loader cleaned up");
         } catch (loaderError) {
-          console.warn('⚠️ Account loader cleanup warning:', loaderError.message);
+          console.warn(
+            "⚠️ Account loader cleanup warning:",
+            loaderError.message
+          );
         }
       }
-      
-      console.log('✅ Drift client cleaned up successfully');
+
+      console.log("✅ Drift client cleaned up successfully");
     }
   } catch (error) {
-    console.error('⚠️ Error during Drift client cleanup:', error.message);
+    console.error("⚠️ Error during Drift client cleanup:", error.message);
   }
 }
 
@@ -207,15 +234,19 @@ function validateWalletAddress(address) {
  * Error Response Utility
  * Standardized error response format
  */
-function createErrorResponse(error, message = 'An error occurred', statusCode = 500) {
+function createErrorResponse(
+  error,
+  message = "An error occurred",
+  statusCode = 500
+) {
   console.error(`❌ ${message}:`, error.message);
-  
+
   return {
     success: false,
     error: error.message,
     message,
     timestamp: new Date().toISOString(),
-    statusCode
+    statusCode,
   };
 }
 
@@ -223,12 +254,12 @@ function createErrorResponse(error, message = 'An error occurred', statusCode = 
  * Success Response Utility
  * Standardized success response format
  */
-function createSuccessResponse(data, message = 'Operation successful') {
+function createSuccessResponse(data, message = "Operation successful") {
   return {
     success: true,
     data,
     message,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   };
 }
 
@@ -237,19 +268,21 @@ function createSuccessResponse(data, message = 'Operation successful') {
  * Serializes instructions for frontend consumption
  */
 function serializeInstructions(instructions, blockhash, feePayer) {
-  return instructions.map(instruction => {
+  return instructions.map((instruction) => {
     const message = new Transaction().add(instruction);
     message.recentBlockhash = blockhash;
     message.feePayer = feePayer;
-    
+
     return {
-      instruction: instruction.data ? instruction.data.toString('base64') : null,
+      instruction: instruction.data
+        ? instruction.data.toString("base64")
+        : null,
       programId: instruction.programId.toString(),
-      keys: instruction.keys.map(key => ({
+      keys: instruction.keys.map((key) => ({
         pubkey: key.pubkey.toString(),
         isSigner: key.isSigner,
-        isWritable: key.isWritable
-      }))
+        isWritable: key.isWritable,
+      })),
     };
   });
 }
@@ -258,8 +291,9 @@ function serializeInstructions(instructions, blockhash, feePayer) {
  * Compute Budget Utility
  * Creates compute budget instructions for different operation types
  */
-function createComputeBudgetInstruction(operationType = 'default') {
-  const computeUnits = COMPUTE_UNITS[operationType.toUpperCase()] || COMPUTE_UNITS.DEFAULT;
+function createComputeBudgetInstruction(operationType = "default") {
+  const computeUnits =
+    COMPUTE_UNITS[operationType.toUpperCase()] || COMPUTE_UNITS.DEFAULT;
   return ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnits });
 }
 
@@ -271,16 +305,19 @@ async function getUserUSDCTokenAccount(connection, walletAddress) {
   try {
     const usdcMint = getUSDCMint();
     const walletPubkey = new PublicKey(walletAddress);
-    
-    const tokenAccounts = await connection.getTokenAccountsByOwner(walletPubkey, { mint: usdcMint });
-    
+
+    const tokenAccounts = await connection.getTokenAccountsByOwner(
+      walletPubkey,
+      { mint: usdcMint }
+    );
+
     if (tokenAccounts.value.length === 0) {
-      throw new Error('No USDC token account found');
+      throw new Error("No USDC token account found");
     }
-    
+
     return tokenAccounts.value[0].pubkey;
   } catch (error) {
-    console.error('❌ Failed to get USDC token account:', error.message);
+    console.error("❌ Failed to get USDC token account:", error.message);
     throw error;
   }
 }
@@ -302,20 +339,20 @@ module.exports = {
   createConnection,
   createDriftClient,
   cleanupDriftClient,
-  
+
   // Utilities
   getUSDCMint,
   validateWalletAddress,
   getUserUSDCTokenAccount,
-  
+
   // Response Utilities
   createErrorResponse,
   createSuccessResponse,
-  
+
   // Transaction Utilities
   serializeInstructions,
   createComputeBudgetInstruction,
-  
+
   // Middleware
-  asyncHandler
+  asyncHandler,
 };
