@@ -8,25 +8,13 @@ if (window.ethereum) {
 // REKT Drift Protocol API Interface
 class DriftAPIInterface {
   constructor() {
-    this.ws = null;
-    this.isConnected = false;
+    // Centralized port configuration - change this one variable to update all endpoints
+    const SERVER_PORT = 3001;
 
-    // Console capture state
-    this.consoleCaptureEnabled = true;
-    this.originalConsole = {
-      log: console.log,
-      error: console.error,
-      warn: console.warn,
-      info: console.info,
-    };
-
-    // Override console methods to capture logs
-    this.setupConsoleCapture();
-    // Application configuration
     this.config = {
-      // API and WebSocket endpoints
-      apiUrl: "http://localhost:3001/api",
-      wsUrl: "ws://localhost:3001",
+      // API and WebSocket endpoints - automatically use SERVER_PORT
+      apiUrl: `http://localhost:${SERVER_PORT}/api`,
+      wsUrl: `ws://localhost:${SERVER_PORT}`,
       walletAddress: null,
 
       // Solana RPC configuration - Using RPC Pool
@@ -38,7 +26,7 @@ class DriftAPIInterface {
       driftStateAccount: "Dd4vYjKj3tFkZ3fM4Rxqk6SJToZ9TvLtqYG8j5RfQ2hx",
       wsEndpoint:
         window.location.hostname === "localhost"
-          ? "ws://localhost:3001"
+          ? `ws://localhost:${SERVER_PORT}`
           : "wss://your-production-url.com",
       walletAddress: null,
       connection: null,
@@ -198,27 +186,7 @@ class DriftAPIInterface {
       tradeButton.addEventListener("click", () => this.submitTrade());
     }
 
-    // Initialize refresh button
-    const refreshBtn = document.getElementById("refresh-positions");
-    if (refreshBtn) {
-      refreshBtn.addEventListener("click", () => this.refreshPositions());
-    }
-
-    // Initialize admin toggle
-    const adminToggle = document.getElementById("high-leverage-mode-toggle");
-    if (adminToggle) {
-      adminToggle.addEventListener("change", (e) =>
-        this.toggleHighLeverageMode(e.target.checked)
-      );
-    }
-
-    // Initialize auto-refresh toggle
-    const autoRefreshToggle = document.getElementById("auto-refresh-toggle");
-    if (autoRefreshToggle) {
-      autoRefreshToggle.addEventListener("change", (e) =>
-        this.toggleAutoRefresh(e.target.checked)
-      );
-    }
+    // Manual refresh button and admin toggles removed - auto-refresh is now always enabled
 
     console.log("✅ Trading interface initialized");
   }
@@ -401,7 +369,7 @@ class DriftAPIInterface {
     console.log("📈 Position update:", data);
     // Handle position updates if needed
     if (this.config.walletAddress) {
-      this.refreshPositions();
+      // Position updates handled automatically via WebSocket
     }
   }
 
@@ -590,9 +558,8 @@ class DriftAPIInterface {
     document
       .getElementById("submit-trade-btn")
       .addEventListener("click", () => this.submitTrade());
-    document
-      .getElementById("refresh-positions-btn")
-      .addEventListener("click", () => this.refreshPositions());
+    document.getElementById("refresh-positions-btn");
+    // Manual refresh button removed - auto-refresh is always enabled
 
     // Market selection controls
     document
@@ -914,7 +881,7 @@ class DriftAPIInterface {
         await Promise.all([
           this.fetchUSDCBalance(),
           this.fetchMarkets(),
-          this.refreshPositions(),
+          // Position updates handled by WebSocket
         ]);
 
         this.logMessage(
@@ -1047,7 +1014,7 @@ class DriftAPIInterface {
       tradingInterface.style.display = "block";
 
       // Show admin panel for feature flag control
-      this.showAdminPanel();
+      // Admin panel removed - high leverage mode is now always enabled
 
       const displayAddress = `${walletAddress.substring(
         0,
@@ -1536,7 +1503,7 @@ class DriftAPIInterface {
 
       // Auto-refresh positions after successful trade
       setTimeout(() => {
-        this.refreshPositions();
+        // Position updates now handled automatically via WebSocket
       }, 2000);
     } catch (error) {
       this.logMessage("error", `❌ Trade failed: ${error.message}`);
@@ -1902,134 +1869,7 @@ class DriftAPIInterface {
       .replace(/'/g, "&#39;");
   }
 
-  async refreshPositions(forceRefresh = false) {
-    // Prevent concurrent refreshes
-    if (this.config.isRefreshingPositions) {
-      console.log("Position refresh already in progress, skipping...");
-      return;
-    }
-
-    // Skip API refresh if WebSocket is providing real-time updates (unless forced)
-    if (
-      !forceRefresh &&
-      this.ws &&
-      this.ws.readyState === WebSocket.OPEN &&
-      this.config.walletAddress
-    ) {
-      // Check if we have a recent WebSocket position update (within last 15 seconds)
-      const lastUpdate = this.config.lastPositionUpdate || 0;
-      const timeSinceUpdate = Date.now() - lastUpdate;
-
-      if (timeSinceUpdate < 15000) {
-        // 15 seconds
-        console.log(
-          "🚀 Skipping API refresh - WebSocket providing real-time data"
-        );
-        return;
-      }
-    }
-
-    const container = document.getElementById("positions-container");
-    if (!container) {
-      console.error("Positions container not found");
-      return;
-    }
-
-    // Show loading state
-    const refreshBtn = document.getElementById("refresh-positions-btn");
-    const originalBtnText = refreshBtn ? refreshBtn.textContent : "Refresh";
-
-    if (refreshBtn) {
-      refreshBtn.disabled = true;
-      refreshBtn.textContent = "Refreshing...";
-    }
-
-    // Set loading state
-    this.config.isRefreshingPositions = true;
-    container.classList.add("loading");
-
-    try {
-      if (!this.config.walletAddress) {
-        container.innerHTML = `
-                    <div class="no-positions">
-                        <p>Connect your wallet to view positions</p>
-                    </div>`;
-        return;
-      }
-
-      console.log(
-        "🔄 Fetching positions for wallet:",
-        this.config.walletAddress
-      );
-
-      // Use backend API to get real positions from Drift SDK
-      const response = await fetch(
-        `/api/markets/positions/${this.config.walletAddress}`
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          `Failed to fetch positions: ${response.status} ${response.statusText}`
-        );
-      }
-
-      const result = await response.json();
-
-      if (!result.success) {
-        throw new Error(result.error || "Failed to fetch positions");
-      }
-
-      const positions = result.positions || [];
-
-      // Update the UI with the positions
-      this.displayPositions(positions);
-
-      // Update last updated timestamp
-      const now = new Date();
-      console.log(
-        `✅ Fetched ${
-          positions.length
-        } positions at ${now.toLocaleTimeString()}`
-      );
-
-      // Dispatch custom event for other components to listen to
-      document.dispatchEvent(
-        new CustomEvent("positions-updated", {
-          detail: {
-            positions: positions,
-            timestamp: now.toISOString(),
-          },
-        })
-      );
-    } catch (error) {
-      console.error("❌ Error in refreshPositions:", error);
-      this.logMessage("error", "Failed to refresh positions: " + error.message);
-
-      // Show error in UI
-      if (container) {
-        container.innerHTML = `
-                    <div class="error-message">
-                        <p>Failed to load positions</p>
-                        <p class="small">${this.escapeHtml(error.message)}</p>
-                        <button class="btn btn-sm btn-retry" onclick="driftAPI.refreshPositions()">
-                            Retry
-                        </button>
-                    </div>`;
-      }
-    } finally {
-      // Reset loading state
-      this.config.isRefreshingPositions = false;
-      if (container) {
-        container.classList.remove("loading");
-      }
-
-      // Reset refresh button
-      if (refreshBtn) {
-        refreshBtn.disabled = false;
-        refreshBtn.textContent = originalBtnText;
-      }
-    }
-  }
+  // Manual refresh function removed - positions are now updated automatically via WebSocket every 3 seconds
 
   displayPositions(positions) {
     const container = document.getElementById("positions-container");
@@ -2306,7 +2146,7 @@ class DriftAPIInterface {
 
       // Refresh positions and balance after successful close
       setTimeout(async () => {
-        await Promise.all([this.refreshPositions(), this.fetchUSDCBalance()]);
+        await this.fetchUSDCBalance(); // Position updates handled by WebSocket
         this.logMessage(
           "info",
           "🔄 Refreshed positions and balance after close"
@@ -2434,10 +2274,7 @@ class DriftAPIInterface {
 
     // Only set up WebSocket subscription if we have a connected wallet
     if (this.config.walletAddress) {
-      // Do initial refresh
-      this.refreshPositions(true).catch((error) => {
-        console.error("Error in initial position refresh:", error);
-      });
+      // Position updates handled automatically via WebSocket - no manual refresh needed
 
       // Subscribe to WebSocket updates with retry logic
       const attemptSubscription = () => {
@@ -2520,12 +2357,7 @@ class DriftAPIInterface {
       }
 
       // Check if auto-refresh is enabled (default to true if not set)
-      const autoRefreshEnabled = this.config.autoRefreshEnabled !== false;
-
-      if (!autoRefreshEnabled) {
-        console.log("🔄 Position update received but auto-refresh is disabled");
-        return;
-      }
+      // Auto-refresh is now always enabled
 
       // Track last update time for optimization
       this.config.lastPositionUpdate = Date.now();
@@ -2660,114 +2492,9 @@ class DriftAPIInterface {
   }
 
   // Admin Methods for Feature Flag Management
-  async fetchFeatureFlags() {
-    try {
-      const response = await fetch("/api/admin/feature-flags");
-      const result = await response.json();
+  // fetchFeatureFlags function removed - feature flags no longer used
 
-      if (result.success) {
-        this.updateAdminUI(result.featureFlags);
-      }
-    } catch (error) {
-      console.warn("Could not fetch feature flags:", error.message);
-    }
-  }
-
-  async toggleHighLeverageMode(enabled) {
-    try {
-      this.logMessage(
-        "info",
-        `🔧 ${enabled ? "Enabling" : "Disabling"} High Leverage Mode...`
-      );
-
-      const response = await fetch("/api/admin/toggle-high-leverage-mode", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ enabled }),
-      });
-
-      const result = await response.json();
-
-      if (result.success) {
-        this.logMessage("success", `✅ ${result.message}`);
-        this.updateAdminUI(result.currentSettings);
-      } else {
-        this.logMessage("error", `❌ Failed to toggle mode: ${result.error}`);
-        // Revert toggle if failed
-        const toggle = document.getElementById("high-leverage-mode-toggle");
-        if (toggle) toggle.checked = !enabled;
-      }
-    } catch (error) {
-      this.logMessage("error", `❌ Error toggling mode: ${error.message}`);
-      // Revert toggle if failed
-      const toggle = document.getElementById("high-leverage-mode-toggle");
-      if (toggle) toggle.checked = !enabled;
-    }
-  }
-
-  updateAdminUI(featureFlags) {
-    const toggle = document.getElementById("high-leverage-mode-toggle");
-    const modeDisplay = document.getElementById("current-mode-display");
-
-    if (toggle) {
-      toggle.checked = featureFlags.USE_HIGH_LEVERAGE_MODE;
-    }
-
-    if (modeDisplay) {
-      if (featureFlags.USE_HIGH_LEVERAGE_MODE) {
-        modeDisplay.textContent = "HIGH LEVERAGE MODE";
-        modeDisplay.style.background = "#28a745"; // Green for high leverage
-        modeDisplay.style.color = "white";
-        modeDisplay.style.border = "2px solid #28a745";
-      } else {
-        modeDisplay.textContent = "LEGACY MODE";
-        modeDisplay.style.background = "#dc3545"; // Red for legacy mode
-        modeDisplay.style.color = "white";
-        modeDisplay.style.border = "2px solid #dc3545";
-      }
-      modeDisplay.style.padding = "6px 12px";
-      modeDisplay.style.borderRadius = "6px";
-      modeDisplay.style.fontWeight = "bold";
-      modeDisplay.style.fontSize = "11px";
-    }
-  }
-  showAdminPanel() {
-    const adminPanel = document.getElementById("admin-panel");
-    if (adminPanel) {
-      adminPanel.style.display = "block";
-      this.fetchFeatureFlags(); // Load current settings
-    }
-  }
-
-  toggleAutoRefresh(enabled) {
-    this.config.autoRefreshEnabled = enabled;
-
-    const statusDisplay = document.getElementById("position-update-status");
-    if (statusDisplay) {
-      if (enabled) {
-        statusDisplay.textContent = "AUTO-REFRESH ON";
-        statusDisplay.style.background = "#28a745"; // Green
-      } else {
-        statusDisplay.textContent = "AUTO-REFRESH OFF";
-        statusDisplay.style.background = "#dc3545"; // Red
-      }
-    }
-
-    this.logMessage(
-      "info",
-      `🔄 Position auto-refresh ${enabled ? "enabled" : "disabled"}`
-    );
-
-    // If disabled, user will need to manually refresh
-    if (!enabled) {
-      this.logMessage(
-        "info",
-        "💡 Use the refresh button to update positions manually"
-      );
-    }
-  }
+  // Admin functions removed - high leverage mode and auto-refresh are now always enabled
 }
 
 // Note: Initialization is now handled by the HTML file to ensure proper dependency loading

@@ -79,21 +79,4 @@ module.exports = {
 
   // Server
   SERVER_CONFIG,
-
-  // Feature Flags
-  FEATURE_FLAGS: {
-    // High Leverage Mode - Set to true to use high leverage mode for all trades
-    USE_HIGH_LEVERAGE_MODE:
-      process.env.USE_HIGH_LEVERAGE_MODE === "true" || false,
-
-    // Auto-enable high leverage mode for users (when USE_HIGH_LEVERAGE_MODE is true)
-    AUTO_ENABLE_HIGH_LEVERAGE:
-      process.env.AUTO_ENABLE_HIGH_LEVERAGE === "true" || true,
-
-    // Fallback to legacy mode if high leverage mode fails
-    FALLBACK_TO_LEGACY: process.env.FALLBACK_TO_LEGACY === "true" || true,
-
-    // Debug mode - logs which implementation is being used
-    DEBUG_TRADE_MODE: process.env.DEBUG_TRADE_MODE === "true" || true,
-  },
 };

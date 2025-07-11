@@ -136,101 +136,7 @@
               </div>
             </div>
 
-            <!-- Admin Feature Toggle -->
-            <div
-              id="admin-panel"
-              class="admin-section"
-              style="
-                display: none;
-                margin: 20px 0;
-                padding: 15px;
-                border: 2px dashed #444;
-                border-radius: 8px;
-                background: rgba(255, 255, 255, 0.05);
-              "
-            >
-              <h4 style="margin: 0 0 10px 0; color: #ff6b35">
-                🔧 Admin: Trade Implementation
-              </h4>
-              <div style="display: flex; align-items: center; gap: 15px">
-                <label
-                  style="
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    cursor: pointer;
-                  "
-                >
-                  <input
-                    type="checkbox"
-                    id="high-leverage-mode-toggle"
-                    style="transform: scale(1.2)"
-                  />
-                  <span>Use High Leverage Mode (All Trades)</span>
-                </label>
-                <div
-                  id="current-mode-display"
-                  style="
-                    padding: 4px 8px;
-                    border-radius: 4px;
-                    font-size: 12px;
-                    font-weight: bold;
-                  "
-                >
-                  LEGACY MODE
-                </div>
-              </div>
-              <div style="font-size: 12px; color: #888; margin-top: 8px">
-                Toggle between High Leverage Mode (1x-100x) and Legacy Mode
-                (1x-20x with fallback)
-              </div>
-
-              <!-- Position Auto-Refresh Control -->
-              <div
-                style="
-                  display: flex;
-                  align-items: center;
-                  gap: 15px;
-                  margin-top: 15px;
-                  padding-top: 15px;
-                  border-top: 1px solid #444;
-                "
-              >
-                <label
-                  style="
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    cursor: pointer;
-                  "
-                >
-                  <input
-                    type="checkbox"
-                    id="auto-refresh-toggle"
-                    checked
-                    style="transform: scale(1.2)"
-                  />
-                  <span>Auto-refresh Positions (3s)</span>
-                </label>
-                <div
-                  id="position-update-status"
-                  style="
-                    padding: 4px 8px;
-                    border-radius: 4px;
-                    font-size: 12px;
-                    background: #28a745;
-                    color: white;
-                    font-weight: bold;
-                  "
-                >
-                  AUTO-REFRESH ON
-                </div>
-              </div>
-              <div style="font-size: 12px; color: #888; margin-top: 8px">
-                Automatic position updates via WebSocket (immediate after
-                trades)
-              </div>
-            </div>
+            <!-- Admin panel removed - high leverage mode and 3-second auto-refresh are now always enabled -->
 
             <div
               id="trading-interface"
@@ -336,9 +242,9 @@
             <div class="card" id="positions-section">
               <div class="positions-header">
                 <h3>📊 Open Positions</h3>
-                <button id="refresh-positions-btn" class="btn btn-secondary">
-                  🔄 Refresh
-                </button>
+                <span style="font-size: 12px; color: #888"
+                  >Auto-refreshing every 3 seconds</span
+                >
               </div>
               <div id="positions-container">
                 <!-- Positions will be dynamically inserted here by JavaScript -->
