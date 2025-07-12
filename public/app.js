@@ -38,6 +38,11 @@ class DriftAPIInterface {
       positionRefreshInterval: 30000, // 30 seconds
       positionRefreshTimer: null, // For tracking the position refresh interval
       isRefreshingPositions: false, // To prevent concurrent refreshes
+      isConnecting: false, // To prevent multiple connection attempts
+      reconnectTimeout: null, // To track reconnection timeout
+      heartbeatInterval: null, // To track heartbeat timer
+      lastHeartbeat: null, // Last heartbeat timestamp
+      heartbeatTimeout: 30000, // 30 seconds heartbeat interval
     };
 
     // Initialize markets array
@@ -195,19 +200,43 @@ class DriftAPIInterface {
    * Connect to WebSocket server for real-time updates
    */
   connectWebSocket() {
+    // Prevent multiple simultaneous connection attempts
+    if (this.config.isConnecting) {
+      console.log("🔄 Connection attempt already in progress, skipping...");
+      return;
+    }
+
+    // Don't reconnect if already connected and healthy
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.isConnected) {
+      console.log(
+        "✅ WebSocket already connected and healthy, skipping reconnection"
+      );
+      return;
+    }
+
     try {
-      // Close existing connection if any
-      if (this.ws) {
+      this.config.isConnecting = true;
+
+      // Clear any existing reconnect timeout
+      if (this.config.reconnectTimeout) {
+        clearTimeout(this.config.reconnectTimeout);
+        this.config.reconnectTimeout = null;
+      }
+
+      // Only close existing connection if it's not already closed
+      if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+        console.log("🔄 Closing existing WebSocket connection");
         this.ws.close();
       }
 
       // Create new WebSocket connection
+      console.log("🔗 Creating new WebSocket connection");
       this.ws = new WebSocket(this.config.wsEndpoint);
-
       // Connection opened
       this.ws.addEventListener("open", () => {
         console.log("✅ Connected to WebSocket server");
         this.isConnected = true;
+        this.config.isConnecting = false;
         this.updateConnectionStatus("Connected", "success");
 
         // Subscribe to updates for all markets
@@ -223,6 +252,9 @@ class DriftAPIInterface {
         if (this.config.walletAddress) {
           this.registerWalletWithWebSocket();
         }
+
+        // Start heartbeat to keep connection alive
+        this.startHeartbeat();
       });
 
       // Listen for messages
@@ -239,23 +271,77 @@ class DriftAPIInterface {
       this.ws.addEventListener("close", () => {
         console.log("❌ Disconnected from WebSocket server");
         this.isConnected = false;
+        this.config.isConnecting = false;
         this.updateConnectionStatus("Disconnected", "error");
 
-        // Attempt to reconnect after a delay
-        setTimeout(() => this.connectWebSocket(), 5000);
+        // Stop heartbeat
+        this.stopHeartbeat();
+
+        // Attempt to reconnect after a delay (only if not already scheduled)
+        if (!this.config.reconnectTimeout) {
+          this.config.reconnectTimeout = setTimeout(() => {
+            this.config.reconnectTimeout = null;
+            this.connectWebSocket();
+          }, 5000);
+        }
       });
 
       // Handle errors
       this.ws.addEventListener("error", (error) => {
         console.error("WebSocket error:", error);
+        this.config.isConnecting = false;
         this.updateConnectionStatus("Connection error", "error");
       });
     } catch (error) {
       console.error("Error connecting to WebSocket:", error);
+      this.config.isConnecting = false;
       this.updateConnectionStatus("Connection failed", "error");
 
-      // Retry connection after a delay
-      setTimeout(() => this.connectWebSocket(), 5000);
+      // Retry connection after a delay (only if not already scheduled)
+      if (!this.config.reconnectTimeout) {
+        this.config.reconnectTimeout = setTimeout(() => {
+          this.config.reconnectTimeout = null;
+          this.connectWebSocket();
+        }, 5000);
+      }
+    }
+  }
+
+  /**
+   * Start heartbeat to keep WebSocket connection alive
+   */
+  startHeartbeat() {
+    // Clear any existing heartbeat
+    this.stopHeartbeat();
+
+    this.config.heartbeatInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        // Send ping message
+        this.ws.send(
+          JSON.stringify({
+            type: "ping",
+            timestamp: Date.now(),
+          })
+        );
+        this.config.lastHeartbeat = Date.now();
+      } else {
+        // Connection is dead, stop heartbeat and try to reconnect
+        console.log(
+          "💔 Heartbeat detected dead connection, attempting reconnect"
+        );
+        this.stopHeartbeat();
+        this.connectWebSocket();
+      }
+    }, this.config.heartbeatTimeout);
+  }
+
+  /**
+   * Stop heartbeat timer
+   */
+  stopHeartbeat() {
+    if (this.config.heartbeatInterval) {
+      clearInterval(this.config.heartbeatInterval);
+      this.config.heartbeatInterval = null;
     }
   }
 
@@ -268,7 +354,12 @@ class DriftAPIInterface {
       if (!message || !message.type) return;
 
       // Handle different message types
-      if (message.type === "market_data") {
+      if (message.type === "pong") {
+        // Handle heartbeat response
+        console.log("💓 Received heartbeat pong");
+        this.config.lastHeartbeat = Date.now();
+        return;
+      } else if (message.type === "market_data") {
         this.displayMarkets(message.data);
         this.logMessage("success", `✅ Loaded ${message.data.length} markets`);
       } else if (message.type === "price_update") {
@@ -915,7 +1006,7 @@ class DriftAPIInterface {
             '<div class="error-message">',
             "    <p>Failed to connect wallet</p>",
             '    <p class="small">' + this.escapeHtml(errorMessage) + "</p>",
-            '    <button class="btn btn-sm btn-retry" onclick="driftAPI.connectWallet()">',
+            '    <button class="btn btn-sm btn-retry" data-action="connect-wallet">',
             "        Try Again",
             "    </button>",
             "</div>",
@@ -946,7 +1037,7 @@ class DriftAPIInterface {
           '<div class="error-message">',
           "    <p>Connection error</p>",
           '    <p class="small">' + this.escapeHtml(errorMessage) + "</p>",
-          '    <button class="btn btn-sm btn-retry" onclick="driftAPI.connectWallet()">',
+          '    <button class="btn btn-sm btn-retry" data-action="connect-wallet">',
           "        Try Again",
           "    </button>",
           "</div>",
@@ -1953,9 +2044,9 @@ class DriftAPIInterface {
                     </div>
                 </div>
                 <div class="position-actions">
-                    <button class="btn-close" onclick="driftAPI.closePosition('${
+                    <button class="btn-close" data-action="close-position" data-position-id="${
                       position.id || ""
-                    }')">
+                    }">
                         Close Position
                     </button>
                 </div>
@@ -2495,6 +2586,31 @@ class DriftAPIInterface {
   // fetchFeatureFlags function removed - feature flags no longer used
 
   // Admin functions removed - high leverage mode and auto-refresh are now always enabled
+
+  /**
+   * Cleanup WebSocket connections and timers
+   */
+  cleanup() {
+    console.log("🧹 Cleaning up WebSocket connections and timers");
+
+    // Stop heartbeat
+    this.stopHeartbeat();
+
+    // Clear reconnection timeout
+    if (this.config.reconnectTimeout) {
+      clearTimeout(this.config.reconnectTimeout);
+      this.config.reconnectTimeout = null;
+    }
+
+    // Close WebSocket connection
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+      this.ws.close();
+    }
+
+    // Reset connection state
+    this.isConnected = false;
+    this.config.isConnecting = false;
+  }
 }
 
 // Note: Initialization is now handled by the HTML file to ensure proper dependency loading
@@ -2537,3 +2653,39 @@ window.testWS = {
     input.value = JSON.stringify(window.sampleWebSocketMessages.ping, null, 2);
   },
 };
+
+// Global event listener for data-action buttons (fixes CSP inline handler issues)
+document.addEventListener("click", function (event) {
+  const action = event.target.getAttribute("data-action");
+
+  if (action === "connect-wallet") {
+    event.preventDefault();
+    driftAPI.connectWallet();
+  } else if (action === "close-position") {
+    event.preventDefault();
+    const positionId = event.target.getAttribute("data-position-id");
+    driftAPI.closePosition(positionId);
+  }
+});
+
+// Cleanup WebSocket connections when page unloads
+window.addEventListener("beforeunload", function () {
+  if (window.driftAPI) {
+    window.driftAPI.cleanup();
+  }
+});
+
+// Also cleanup on page hide (for mobile/tab switching)
+document.addEventListener("visibilitychange", function () {
+  if (document.visibilityState === "hidden" && window.driftAPI) {
+    // Don't fully cleanup on hide, just stop heartbeat to save resources
+    window.driftAPI.stopHeartbeat();
+  } else if (
+    document.visibilityState === "visible" &&
+    window.driftAPI &&
+    window.driftAPI.isConnected
+  ) {
+    // Restart heartbeat when page becomes visible again
+    window.driftAPI.startHeartbeat();
+  }
+});

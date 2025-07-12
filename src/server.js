@@ -24,6 +24,7 @@ const {
   calculateEffectiveLeverage,
   getMarginShortage,
   MarginMode,
+  calculatePositionPNL,
 } = require("@drift-labs/sdk");
 const fetch = require("node-fetch");
 
@@ -1866,43 +1867,96 @@ app.get(
             }
             const positionValue = markPrice * positionSize;
             let actualLeverage = 1;
+            let accurateUnrealizedPnl = unrealizedPnl; // Default to manual calculation
+
             try {
-              const entryValueUSD = avgEntryPrice * positionSize;
-              const quoteEntryAbs = Math.abs(quoteEntry);
-              if (quoteEntryAbs > 0 && entryValueUSD > 0) {
-                if (quoteEntryAbs < entryValueUSD * 0.9) {
-                  actualLeverage = entryValueUSD / quoteEntryAbs;
-                } else {
-                  const estimatedMargin = entryValueUSD / 15;
-                  actualLeverage = entryValueUSD / estimatedMargin;
+              // ✅ USE REAL DRIFT SDK VALUES (same as WebSocket)
+              const market = driftClient.getPerpMarketAccount(
+                pos.marketIndex || 0
+              );
+              const oracleData = driftClient.getOracleDataForPerpMarket(
+                pos.marketIndex || 0
+              );
+              const user = driftClient.getUser();
+
+              // Calculate position-specific leverage using correct approach
+              // Position leverage = Position Value / Margin Used for this position
+              const positionValueUSD = Math.abs(positionSize * markPrice);
+
+              // Method 1: Use quoteEntry as the margin used for this position
+              // quoteEntry represents the collateral/margin used when opening the position
+              const quoteEntryAbs = Math.abs(quoteEntry / 1e6); // Convert from lamports to USD
+
+              if (quoteEntryAbs > 0 && positionValueUSD > 0) {
+                actualLeverage = positionValueUSD / quoteEntryAbs;
+                console.log(
+                  `  ✅ Position-specific leverage: ${actualLeverage.toFixed(
+                    4
+                  )}x`
+                );
+                console.log(
+                  `     Position value: $${positionValueUSD.toFixed(
+                    2
+                  )}, Margin used: $${quoteEntryAbs.toFixed(2)}`
+                );
+              } else {
+                // Method 2: Calculate based on market's margin requirements
+                try {
+                  // Get the market's initial margin ratio
+                  const initialMarginRatio =
+                    parseFloat(market.marginRatioInitial.toString()) / 10000; // Convert from basis points
+                  const requiredMargin = positionValueUSD * initialMarginRatio;
+
+                  if (requiredMargin > 0) {
+                    actualLeverage = positionValueUSD / requiredMargin;
+                    console.log(
+                      `  📊 Market-based leverage: ${actualLeverage.toFixed(
+                        4
+                      )}x (margin ratio: ${(initialMarginRatio * 100).toFixed(
+                        2
+                      )}%)`
+                    );
+                  } else {
+                    actualLeverage = 1;
+                    console.log(`  ⚠️ Using 1x fallback leverage`);
+                  }
+                } catch (marginError) {
+                  actualLeverage = 1;
+                  console.log(
+                    `  ⚠️ Margin calculation failed, using 1x: ${marginError.message}`
+                  );
                 }
               }
-              if (
-                actualLeverage <= 1 ||
-                actualLeverage > 50 ||
-                !isFinite(actualLeverage)
-              ) {
-                if (entryValueUSD > 500) {
-                  actualLeverage = Math.min(entryValueUSD / 25, 30);
-                } else if (entryValueUSD > 100) {
-                  actualLeverage = Math.min(entryValueUSD / 15, 20);
-                } else {
-                  actualLeverage = Math.min(entryValueUSD / 10, 10);
-                }
-              }
-              if (
-                actualLeverage <= 1 ||
-                actualLeverage > 50 ||
-                !isFinite(actualLeverage)
-              ) {
-                actualLeverage = 13;
+
+              // Get real position PnL from Drift SDK
+              try {
+                const positionPnl = calculatePositionPNL(
+                  market,
+                  pos,
+                  true,
+                  oracleData
+                );
+                const realPnlUSD =
+                  parseFloat(positionPnl.toString()) / PRICE_PRECISION;
+
+                // Use real SDK value
+                accurateUnrealizedPnl = realPnlUSD;
+
+                console.log(
+                  `📊 API: Using real Drift SDK PnL: $${realPnlUSD.toFixed(4)}`
+                );
+              } catch (pnlError) {
+                console.log(
+                  `⚠️ API: SDK PnL calculation failed: ${pnlError.message}`
+                );
               }
             } catch (error) {
-              actualLeverage = 10;
+              actualLeverage = 1;
+              console.log(`⚠️ API: SDK calculation failed: ${error.message}`);
             }
             actualLeverage = Math.max(
-              1,
-              Math.min(Math.round(actualLeverage * 10) / 10, 50)
+              0.01,
+              Math.min(Math.round(actualLeverage * 10000) / 10000, 50)
             );
             const maintenanceMarginRatio = 0.025;
             let liquidationPrice = 0;
@@ -1921,8 +1975,12 @@ app.get(
               entryPrice: avgEntryPrice,
               markPrice: markPrice,
               currentPrice: markPrice,
-              pnl: unrealizedPnl,
-              pnlPercentage: pnlPercentage,
+              pnl: accurateUnrealizedPnl,
+              pnlPercentage:
+                accurateUnrealizedPnl !== 0
+                  ? (accurateUnrealizedPnl / (avgEntryPrice * positionSize)) *
+                    100
+                  : pnlPercentage,
               id: (pos.marketIndex || 0).toString(),
               marketIndex: pos.marketIndex || 0,
               leverage: actualLeverage,
@@ -2082,61 +2140,191 @@ async function fetchPositionsForWallet(walletAddress) {
             // If quoteEntry is close to entryValueUSD, this suggests high leverage
             const quoteEntryAbs = Math.abs(quoteEntry);
 
-            // Method 1: If quote entry is much smaller than position value, indicates leverage
-            if (quoteEntryAbs > 0 && entryValueUSD > 0) {
-              if (quoteEntryAbs < entryValueUSD * 0.9) {
-                // Quote entry is significantly less than position value, suggests leverage
-                actualLeverage = entryValueUSD / quoteEntryAbs;
-                console.log(
-                  `  Method 1 - Calculated leverage: ${actualLeverage}`
-                );
-              } else {
-                // Quote entry ≈ position value, suggests the actual margin used was smaller
-                // Try to estimate from position size - larger positions likely use more leverage
-                const estimatedMargin = entryValueUSD / 15; // Assume ~15x average leverage for large positions
-                actualLeverage = entryValueUSD / estimatedMargin;
-                console.log(
-                  `  Method 1 - Estimated leverage for large position: ${actualLeverage}`
-                );
-              }
-            }
-
-            // Method 2: Use position size to estimate leverage (fallback)
-            if (
-              actualLeverage <= 1 ||
-              actualLeverage > 50 ||
-              !isFinite(actualLeverage)
-            ) {
-              // Base leverage on position size - larger positions tend to use higher leverage
-              if (entryValueUSD > 500) {
-                actualLeverage = Math.min(entryValueUSD / 25, 30); // Max 30x for large positions
-              } else if (entryValueUSD > 100) {
-                actualLeverage = Math.min(entryValueUSD / 15, 20); // Max 20x for medium positions
-              } else {
-                actualLeverage = Math.min(entryValueUSD / 10, 10); // Max 10x for small positions
-              }
-              console.log(
-                `  Method 2 - Size-based leverage estimate: ${actualLeverage}`
+            // ✅ USE REAL DRIFT SDK VALUES - POSITION-SPECIFIC LEVERAGE
+            try {
+              const market = driftClient.getPerpMarketAccount(
+                pos.marketIndex || 0
               );
-            }
+              const oracleData = driftClient.getOracleDataForPerpMarket(
+                pos.marketIndex || 0
+              );
+              const user = driftClient.getUser();
 
-            // Final bounds check
-            if (
-              actualLeverage <= 1 ||
-              actualLeverage > 50 ||
-              !isFinite(actualLeverage)
-            ) {
-              actualLeverage = 13; // Default to 13x since user said that's the actual leverage
-              console.log(`  Using default 13x leverage`);
+              // Calculate position-specific leverage using correct approach
+              // Position leverage = Position Value / Margin Used for this position
+              const positionValueUSD = Math.abs(positionSize * markPrice);
+
+              // Method 1: Use quoteEntry as the margin used for this position
+              // quoteEntry represents the collateral/margin used when opening the position
+              const quoteEntryAbs = Math.abs(quoteEntry / 1e6); // Convert from lamports to USD
+
+              if (quoteEntryAbs > 0 && positionValueUSD > 0) {
+                actualLeverage = positionValueUSD / quoteEntryAbs;
+                console.log(
+                  `  ✅ Position-specific leverage: ${actualLeverage.toFixed(
+                    4
+                  )}x`
+                );
+                console.log(
+                  `     Position value: $${positionValueUSD.toFixed(
+                    2
+                  )}, Margin used: $${quoteEntryAbs.toFixed(2)}`
+                );
+              } else {
+                // Method 2: Calculate based on market's margin requirements
+                try {
+                  // Get the market's initial margin ratio
+                  const initialMarginRatio =
+                    parseFloat(market.marginRatioInitial.toString()) / 10000; // Convert from basis points
+                  const requiredMargin = positionValueUSD * initialMarginRatio;
+
+                  if (requiredMargin > 0) {
+                    actualLeverage = positionValueUSD / requiredMargin;
+                    console.log(
+                      `  📊 Market-based leverage: ${actualLeverage.toFixed(
+                        4
+                      )}x (margin ratio: ${(initialMarginRatio * 100).toFixed(
+                        2
+                      )}%)`
+                    );
+                  } else {
+                    actualLeverage = 1;
+                    console.log(`  ⚠️ Using 1x fallback leverage`);
+                  }
+                } catch (marginError) {
+                  actualLeverage = 1;
+                  console.log(
+                    `  ⚠️ Margin calculation failed, using 1x: ${marginError.message}`
+                  );
+                }
+              }
+
+              // Get real position PnL from Drift SDK
+              try {
+                const positionPnl = calculatePositionPNL(
+                  market,
+                  pos,
+                  true,
+                  oracleData
+                );
+                const realPnlUSD =
+                  parseFloat(positionPnl.toString()) / PRICE_PRECISION;
+
+                // Override the manual calculation with real SDK value
+                unrealizedPnl = realPnlUSD;
+                pnlPercentage =
+                  unrealizedPnl !== 0
+                    ? (unrealizedPnl / entryValueUSD) * 100
+                    : 0;
+
+                console.log(
+                  `  ✅ Using real Drift SDK PnL: $${realPnlUSD.toFixed(
+                    4
+                  )} (${pnlPercentage.toFixed(2)}%)`
+                );
+              } catch (pnlError) {
+                console.log(
+                  `  ⚠️ SDK PnL calculation failed: ${pnlError.message}`
+                );
+              }
+            } catch (sdkError) {
+              console.log(`  ⚠️ SDK calculation failed: ${sdkError.message}`);
+              actualLeverage = 1; // Safe fallback
             }
           } catch (error) {
             console.warn("WebSocket leverage calc error:", error.message);
             actualLeverage = 10;
           }
 
+          // 🔍 DEBUGGING: Compare current calculation with proper Drift SDK methods
+          try {
+            console.log(
+              `🔍 DEBUGGING: Comparing calculation methods for market ${pos.marketIndex}`
+            );
+
+            // Current method result
+            console.log(`  Current method result: ${actualLeverage}x`);
+
+            // Try proper Drift SDK methods
+            const market = driftClient.getPerpMarketAccount(
+              pos.marketIndex || 0
+            );
+            const oracleData = driftClient.getOracleDataForPerpMarket(
+              pos.marketIndex || 0
+            );
+            const user = driftClient.getUser();
+
+            // Method 1: Position-specific PnL
+            try {
+              const positionPnl = calculatePositionPNL(
+                market,
+                pos,
+                true,
+                oracleData
+              );
+              const pnlUSD =
+                parseFloat(positionPnl.toString()) / PRICE_PRECISION;
+              console.log(
+                `  🎯 Drift SDK Position PnL: $${pnlUSD.toFixed(
+                  4
+                )} (current manual: $${unrealizedPnl.toFixed(4)})`
+              );
+            } catch (e) {
+              console.log(`  ❌ Position PnL calculation failed: ${e.message}`);
+            }
+
+            // Method 2: Position value
+            try {
+              const positionValue = user.getPerpPositionValue(
+                pos.marketIndex || 0,
+                oracleData,
+                false
+              );
+              const positionValueUSD =
+                parseFloat(positionValue.toString()) / PRICE_PRECISION;
+              console.log(
+                `  🎯 Drift SDK Position Value: $${positionValueUSD.toFixed(
+                  2
+                )} (current manual: $${(markPrice * positionSize).toFixed(2)})`
+              );
+            } catch (e) {
+              console.log(
+                `  ❌ Position value calculation failed: ${e.message}`
+              );
+            }
+
+            // Method 3: Account leverage
+            try {
+              const accountLeverage = user.getLeverage();
+              let leverageValue = parseFloat(accountLeverage.toString());
+              if (leverageValue > 1000) leverageValue = leverageValue / 1e6;
+              console.log(
+                `  🎯 Drift SDK Account Leverage: ${leverageValue.toFixed(4)}x`
+              );
+            } catch (e) {
+              console.log(
+                `  ❌ Account leverage calculation failed: ${e.message}`
+              );
+            }
+
+            // Method 4: Total collateral
+            try {
+              const totalCollateral = user.getTotalCollateral();
+              const collateralUSD =
+                parseFloat(totalCollateral.toString()) / 1e6;
+              console.log(
+                `  🎯 Drift SDK Total Collateral: $${collateralUSD.toFixed(2)}`
+              );
+            } catch (e) {
+              console.log(`  ❌ Collateral calculation failed: ${e.message}`);
+            }
+          } catch (debugError) {
+            console.log(`  ❌ Debug comparison failed: ${debugError.message}`);
+          }
+
           actualLeverage = Math.max(
-            1,
-            Math.min(Math.round(actualLeverage * 10) / 10, 50)
+            0.01,
+            Math.min(Math.round(actualLeverage * 10000) / 10000, 50)
           );
           console.log(`  Final leverage: ${actualLeverage}x`);
 

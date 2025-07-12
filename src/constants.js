@@ -41,8 +41,8 @@ const SAFETY_BUFFERS = {
 
 // WebSocket Configuration
 const WEBSOCKET_CONFIG = {
-  PRICE_UPDATE_INTERVAL: 3000, // 3 seconds (faster price updates)
-  POSITION_UPDATE_INTERVAL: 3000, // 3 seconds (much faster position updates)
+  PRICE_UPDATE_INTERVAL: 5000, // 5 seconds (balanced price updates)
+  POSITION_UPDATE_INTERVAL: 3000, // 3 seconds (faster position updates for better UX)
   HEARTBEAT_INTERVAL: 30000, // 30 seconds
 };
 
