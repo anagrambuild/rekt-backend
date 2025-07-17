@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="web3" content="none" />
+    <title>REKT - Drift Protocol API Interface</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="css/positions.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header class="header">
+        <h1>🚀 REKT - Drift Protocol API Interface</h1>
+        <p class="subtitle">
+          Simple web app for interacting with Drift Protocol APIs
+        </p>
+      </header>
+
+      <div class="status-bar">
+        <div class="status-item">
+          <span class="status-label">Connection:</span>
+          <span id="connection-status" class="status-value">Disconnected</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Network:</span>
+          <div class="solana-network">
+            <img src="/solana.png" alt="Solana" class="solana-logo" />
+            <span class="network-name">Solana</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="main-content">
+        <div class="card">
+          <h2>📊 Market Data</h2>
+          <div class="controls">
+            <button id="fetch-markets-btn" class="btn btn-primary">
+              Refresh Markets
+            </button>
+          </div>
+          <div id="markets-container" class="data-container">
+            <p class="placeholder">Market data loads automatically...</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>👛 Wallet & Trading</h2>
+          <div class="wallet-section">
+            <div class="wallet-status">
+              <div id="wallet-disconnected" class="wallet-state">
+                <p>Connect your Phantom wallet to start trading</p>
+                <button id="connect-wallet-btn" class="btn btn-primary">
+                  Connect Phantom Wallet
+                </button>
+              </div>
+              <div
+                id="wallet-connected"
+                class="wallet-state"
+                style="display: none"
+              >
+                <div class="wallet-info">
+                  <div class="wallet-address">
+                    <span class="label">Wallet:</span>
+                    <span id="wallet-address-display">Not Connected</span>
+                    <div
+                      class="wallet-actions"
+                      style="display: inline-flex; gap: 8px; margin-left: 8px"
+                    >
+                      <button
+                        id="copy-wallet-address"
+                        class="icon-btn"
+                        title="Copy to clipboard"
+                        style="display: none"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        >
+                          <rect
+                            x="9"
+                            y="9"
+                            width="13"
+                            height="13"
+                            rx="2"
+                            ry="2"
+                          ></rect>
+                          <path
+                            d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                          ></path>
+                        </svg>
+                      </button>
+                      <a
+                        id="view-on-explorer"
+                        href="#"
+                        target="_blank"
+                        class="icon-btn"
+                        title="View on Solana Explorer"
+                        style="display: none"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        >
+                          <circle cx="12" cy="12" r="10"></circle>
+                          <line x1="2" y1="12" x2="22" y2="12"></line>
+                          <path
+                            d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"
+                          ></path>
+                        </svg>
+                      </a>
+                    </div>
+                  </div>
+                  <div class="wallet-balance">
+                    <span class="label">USDC Balance:</span>
+                    <span id="usdc-balance-display">$0.00</span>
+                  </div>
+                </div>
+                <button id="disconnect-wallet-btn" class="btn btn-secondary">
+                  Disconnect
+                </button>
+              </div>
+            </div>
+
+            <!-- Admin panel removed - high leverage mode and 3-second auto-refresh are now always enabled -->
+
+            <div
+              id="trading-interface"
+              class="trading-section"
+              style="display: none"
+            >
+              <div class="market-selector">
+                <h3>📈 Select Market</h3>
+                <div class="market-tabs">
+                  <button
+                    id="sol-tab"
+                    class="market-tab active"
+                    data-market="SOL-PERP"
+                  >
+                    <span class="market-symbol">SOL</span>
+                    <span class="market-price" id="sol-price">-</span>
+                  </button>
+                  <button
+                    id="btc-tab"
+                    class="market-tab"
+                    data-market="BTC-PERP"
+                  >
+                    <span class="market-symbol">BTC</span>
+                    <span class="market-price" id="btc-price">-</span>
+                  </button>
+                  <button
+                    id="eth-tab"
+                    class="market-tab"
+                    data-market="ETH-PERP"
+                  >
+                    <span class="market-symbol">ETH</span>
+                    <span class="market-price" id="eth-price">-</span>
+                  </button>
+                </div>
+              </div>
+              <div class="trade-form">
+                <div class="trade-input-group">
+                  <label for="trade-amount">Trade Amount (USDC):</label>
+                  <input
+                    type="number"
+                    id="trade-amount"
+                    value="25"
+                    min="1"
+                    max="1000"
+                    class="input"
+                  />
+                </div>
+
+                <div class="trade-input-group">
+                  <label for="leverage-slider"
+                    >Leverage: <span id="leverage-display">1x</span></label
+                  >
+                  <input
+                    type="range"
+                    id="leverage-slider"
+                    min="1"
+                    max="100"
+                    value="1"
+                    class="leverage-slider"
+                  />
+                  <div class="leverage-labels">
+                    <span>1x</span>
+                    <span>50x</span>
+                    <span>100x</span>
+                  </div>
+                </div>
+
+                <div class="trade-direction">
+                  <button
+                    id="long-btn"
+                    class="btn btn-success trade-btn active"
+                  >
+                    Long 📈
+                  </button>
+                  <button id="short-btn" class="btn btn-danger trade-btn">
+                    Short 📉
+                  </button>
+                </div>
+
+                <div class="trade-summary">
+                  <div class="summary-item">
+                    <span>Position Size:</span>
+                    <span id="position-size-display">$5.00</span>
+                  </div>
+                  <div class="summary-item">
+                    <span>Estimated Entry:</span>
+                    <span id="estimated-entry-display">-</span>
+                  </div>
+                </div>
+
+                <button
+                  id="submit-trade-btn"
+                  class="btn btn-primary trade-submit"
+                >
+                  Submit Trade
+                </button>
+              </div>
+
+              <div id="trade-status" class="trade-status"></div>
+            </div>
+
+            <!-- Open Positions Section -->
+            <div class="card" id="positions-section">
+              <div class="positions-header">
+                <h3>📊 Open Positions</h3>
+                <span style="font-size: 12px; color: #888"
+                  >Auto-refreshing every 3 seconds</span
+                >
+              </div>
+              <div id="positions-container">
+                <!-- Positions will be dynamically inserted here by JavaScript -->
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>🔗 WebSocket Events</h2>
+          <div class="controls">
+            <input
+              type="text"
+              id="ws-message-input"
+              placeholder="Enter message to send"
+              class="input"
+            />
+            <button id="send-ws-btn" class="btn btn-primary" disabled>
+              Send Message
+            </button>
+            <button id="test-position-subscription-btn" class="btn btn-warning">
+              Test Position Subscription
+            </button>
+            <button id="clear-log-btn" class="btn btn-secondary">
+              Clear Log
+            </button>
+          </div>
+          <div id="ws-log" class="log-container">
+            <p class="placeholder">WebSocket events will appear here</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>📋 Console Logs</h2>
+          <div class="controls">
+            <button id="clear-console-btn" class="btn btn-secondary">
+              Clear Console
+            </button>
+            <button id="toggle-console-capture-btn" class="btn btn-primary">
+              Stop Capture
+            </button>
+          </div>
+          <div id="console-log" class="log-container">
+            <p class="placeholder">Console logs will appear here</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>⚙️ Configuration</h2>
+          <div class="config-grid">
+            <div class="config-item">
+              <label for="solana-rpc">Solana RPC URL:</label>
+              <input
+                type="text"
+                id="solana-rpc"
+                value="https://api.mainnet-beta.solana.com"
+                class="input"
+              />
+            </div>
+            <div class="config-item">
+              <label for="drift-env">Drift Environment:</label>
+              <select id="drift-env" class="input">
+                <option value="mainnet-beta">Mainnet (Production)</option>
+              </select>
+            </div>
+            <div class="config-item">
+              <label for="wallet-address">Wallet Address:</label>
+              <input
+                type="text"
+                id="wallet-address"
+                placeholder="Enter Solana wallet address"
+                class="input"
+              />
+            </div>
+          </div>
+          <button id="save-config-btn" class="btn btn-primary">
+            Save Configuration
+          </button>
+        </div>
+
+        <div class="card">
+          <h2>🛠 API Testing</h2>
+          <div class="api-test-grid">
+            <div class="api-test-item">
+              <h3>Market Price</h3>
+              <select id="symbol-select" class="input">
+                <option value="SOL-PERP">SOL-PERP</option>
+                <option value="BTC-PERP">BTC-PERP</option>
+                <option value="ETH-PERP">ETH-PERP</option>
+              </select>
+              <button id="get-price-btn" class="btn btn-primary">
+                Get Price
+              </button>
+              <div id="price-result" class="result"></div>
+            </div>
+            <div class="api-test-item">
+              <h3>User Positions</h3>
+              <input
+                type="text"
+                id="position-wallet"
+                placeholder="Wallet address"
+                class="input"
+              />
+              <button id="get-positions-btn" class="btn btn-primary">
+                Get Positions
+              </button>
+              <div id="positions-result" class="result"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="footer">
+        <p>
+          Built for testing Drift Protocol APIs |
+          <a href="https://drift-labs.github.io/v2-teacher/" target="_blank"
+            >Drift Docs</a
+          >
+          |
+          <a href="https://data.api.drift.trade/playground" target="_blank"
+            >API Playground</a
+          >
+        </p>
+      </footer>
+    </div>
+
+    <!-- Load Solana web3.js from jsDelivr CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.87.6/lib/index.iife.min.js"></script>
+
+    <!-- Real data integration via backend APIs -->
+    <script>
+      // Use backend APIs for real Drift data instead of mocking
+      // This is more efficient than bundling the entire SDK
+      console.log("✅ Using backend APIs for real Drift data");
+    </script>
+
+    <script src="app.js"></script>
+
+    <!-- Initialize global driftAPI variable -->
+    <script>
+      // Initialize the global driftAPI instance after DOM is loaded
+      document.addEventListener("DOMContentLoaded", function () {
+        if (typeof DriftAPIInterface !== "undefined") {
+          window.driftAPI = new DriftAPIInterface();
+          console.log("✅ Global driftAPI instance created");
+        } else {
+          console.error("❌ DriftAPIInterface not found");
+        }
+      });
+    </script>
+  </body>
+</html>
