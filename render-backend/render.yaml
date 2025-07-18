@@ -2,15 +2,22 @@ services:
   - type: web
     name: rekt-user-management
     env: node
-    plan: starter
+    plan: free # Start with free tier, can upgrade later
     buildCommand: npm install
     startCommand: npm start
+    healthCheckPath: /health
     envVars:
       - key: SUPABASE_URL
         value: https://amgeuvathssbhopfvubw.supabase.co
-      - key: SUPABASE_SERVICE_KEY
-        sync: false # This will be set manually in Render dashboard for security
+      - key: SUPABASE_ANON_KEY
+        sync: false # Set manually in Render dashboard
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false # Set manually in Render dashboard for security
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 10000
+      - key: RATE_LIMIT_WINDOW_MS
+        value: 60000
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: 100

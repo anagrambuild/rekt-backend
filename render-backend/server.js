@@ -70,42 +70,31 @@ app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/upload", uploadRoutes);
 
+// Health check endpoint for Render
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "healthy",
+    service: "rekt-user-management",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || "development",
+  });
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error("❌ Server error:", err);
-
-  // Handle Supabase errors
-  if (err.code) {
-    return res.status(400).json({
-      error: "Database error",
-      message: err.message,
-      code: err.code,
-    });
-  }
-
-  // Handle multer errors (file upload)
-  if (err.code === "LIMIT_FILE_SIZE") {
-    return res.status(400).json({
-      error: "File too large",
-      message: "Avatar must be less than 5MB",
-    });
-  }
-
-  // Generic error
   res.status(500).json({
     error: "Internal server error",
-    message:
-      process.env.NODE_ENV === "development"
-        ? err.message
-        : "Something went wrong",
+    message: process.env.NODE_ENV === "development" ? err.message : undefined,
   });
 });
 
 // 404 handler
-app.use("*", (req, res) => {
+app.use((req, res) => {
   res.status(404).json({
     error: "Not found",
-    message: `Route ${req.method} ${req.originalUrl} not found`,
+    message: `Route ${req.method} ${req.path} not found`,
   });
 });
 
