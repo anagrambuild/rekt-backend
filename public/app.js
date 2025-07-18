@@ -1,3 +1,37 @@
+// Authentication check - redirect to login if not authenticated
+function checkAuthentication() {
+  const userData = localStorage.getItem("rekt_user");
+  if (!userData) {
+    window.location.href = "/auth.html";
+    return false;
+  }
+
+  try {
+    const sessionData = JSON.parse(userData);
+    if (!sessionData.isAuthenticated) {
+      localStorage.removeItem("rekt_user");
+      window.location.href = "/auth.html";
+      return false;
+    }
+    return sessionData;
+  } catch (error) {
+    console.error("Invalid session data:", error);
+    localStorage.removeItem("rekt_user");
+    window.location.href = "/auth.html";
+    return false;
+  }
+}
+
+// Check authentication on page load
+window.currentUser = checkAuthentication();
+if (!window.currentUser) {
+  // Will redirect to auth page - stop execution here
+  console.log("User not authenticated, redirecting to auth page");
+} else {
+  // User is authenticated, continue with app initialization
+  console.log("User authenticated:", window.currentUser.username);
+}
+
 // Prevent unwanted Web3 provider injections
 if (window.ethereum) {
   console.log("Ethereum provider detected, but not used in this application");
@@ -9,7 +43,7 @@ if (window.ethereum) {
 class DriftAPIInterface {
   constructor() {
     // Centralized port configuration - change this one variable to update all endpoints
-    const SERVER_PORT = 3001;
+    const SERVER_PORT = 3004;
 
     this.config = {
       // API and WebSocket endpoints - automatically use SERVER_PORT
@@ -2689,3 +2723,32 @@ document.addEventListener("visibilitychange", function () {
     window.driftAPI.startHeartbeat();
   }
 });
+
+// User session management
+function initializeUserSession() {
+  const userWelcome = document.getElementById("user-welcome");
+  const logoutBtn = document.getElementById("logout-btn");
+
+  if (window.currentUser && userWelcome) {
+    userWelcome.textContent = `Welcome, ${window.currentUser.username}!`;
+  }
+
+  if (logoutBtn) {
+    logoutBtn.addEventListener("click", handleLogout);
+  }
+}
+function handleLogout() {
+  // Clear session data
+  localStorage.removeItem("rekt_user");
+
+  // Cleanup API connections
+  if (window.driftAPI) {
+    window.driftAPI.cleanup();
+  }
+
+  // Redirect to auth page
+  window.location.href = "/auth.html";
+}
+
+// Initialize user session when DOM is loaded
+document.addEventListener("DOMContentLoaded", initializeUserSession);

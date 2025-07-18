@@ -2,7 +2,7 @@
 const CONFIG = {
   USER_API:
     window.location.hostname === "localhost"
-      ? "http://localhost:3001"
+      ? "http://localhost:3005"
       : "https://rekt-user-management.onrender.com",
 };
 
@@ -27,8 +27,14 @@ function checkExistingSession() {
   const userData = localStorage.getItem("rekt_user");
   if (userData) {
     try {
-      currentUser = JSON.parse(userData);
-      redirectToDashboard();
+      const sessionData = JSON.parse(userData);
+      if (sessionData.isAuthenticated) {
+        currentUser = sessionData;
+        redirectToDashboard();
+      } else {
+        // Invalid session, clear it
+        localStorage.removeItem("rekt_user");
+      }
     } catch (error) {
       console.error("Invalid session data:", error);
       localStorage.removeItem("rekt_user");
@@ -270,9 +276,14 @@ async function handleSignIn(e) {
     const result = await response.json();
 
     if (result.success) {
-      // Store user data
+      // Store user data with session info
       currentUser = result.user;
-      localStorage.setItem("rekt_user", JSON.stringify(currentUser));
+      const sessionData = {
+        ...result.user,
+        loginTime: Date.now(),
+        isAuthenticated: true,
+      };
+      localStorage.setItem("rekt_user", JSON.stringify(sessionData));
 
       // Redirect to dashboard
       redirectToDashboard();
@@ -340,9 +351,14 @@ async function handleCreateAccount(e) {
     const result = await response.json();
 
     if (result.success) {
-      // Store user data
+      // Store user data with session info
       currentUser = result.user;
-      localStorage.setItem("rekt_user", JSON.stringify(currentUser));
+      const sessionData = {
+        ...result.user,
+        loginTime: Date.now(),
+        isAuthenticated: true,
+      };
+      localStorage.setItem("rekt_user", JSON.stringify(sessionData));
 
       // Redirect to dashboard
       redirectToDashboard();

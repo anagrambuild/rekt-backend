@@ -11,10 +11,20 @@
   <body>
     <div class="container">
       <header class="header">
-        <h1>🚀 REKT - Drift Protocol API Interface</h1>
-        <p class="subtitle">
-          Simple web app for interacting with Drift Protocol APIs
-        </p>
+        <div class="header-content">
+          <div class="header-left">
+            <h1>🚀 REKT - Drift Protocol API Interface</h1>
+            <p class="subtitle">
+              Simple web app for interacting with Drift Protocol APIs
+            </p>
+          </div>
+          <div class="header-right">
+            <div class="user-info">
+              <span id="user-welcome" class="user-welcome">Welcome!</span>
+              <button id="logout-btn" class="btn btn-logout">Logout</button>
+            </div>
+          </div>
+        </div>
       </header>
 
       <div class="status-bar">
@@ -387,9 +397,14 @@
     <script>
       // Initialize the global driftAPI instance after DOM is loaded
       document.addEventListener("DOMContentLoaded", function () {
-        if (typeof DriftAPIInterface !== "undefined") {
+        // Only initialize if user is authenticated (currentUser is set by app.js)
+        if (window.currentUser && typeof DriftAPIInterface !== "undefined") {
           window.driftAPI = new DriftAPIInterface();
           console.log("✅ Global driftAPI instance created");
+        } else if (!window.currentUser) {
+          console.log(
+            "⚠️ User not authenticated, skipping DriftAPI initialization"
+          );
         } else {
           console.error("❌ DriftAPIInterface not found");
         }

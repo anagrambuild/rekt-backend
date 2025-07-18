@@ -1954,9 +1954,10 @@ app.get(
               actualLeverage = 1;
               console.log(`⚠️ API: SDK calculation failed: ${error.message}`);
             }
+            // Remove artificial 50x cap to show real leverage values
             actualLeverage = Math.max(
               0.01,
-              Math.min(Math.round(actualLeverage * 10000) / 10000, 50)
+              Math.round(actualLeverage * 10000) / 10000
             );
             const maintenanceMarginRatio = 0.025;
             let liquidationPrice = 0;
@@ -2293,17 +2294,28 @@ async function fetchPositionsForWallet(walletAddress) {
               );
             }
 
-            // Method 3: Account leverage
+            // Method 3: Account leverage - USE THIS AS PRIMARY SOURCE
             try {
               const accountLeverage = user.getLeverage();
               let leverageValue = parseFloat(accountLeverage.toString());
               if (leverageValue > 1000) leverageValue = leverageValue / 1e6;
-              console.log(
-                `  🎯 Drift SDK Account Leverage: ${leverageValue.toFixed(4)}x`
-              );
+
+              // Use SDK leverage as the final value if valid
+              if (leverageValue > 0 && leverageValue < 1000) {
+                actualLeverage = leverageValue;
+                console.log(
+                  `  🎯 WebSocket: Using Drift SDK Account Leverage: ${leverageValue.toFixed(
+                    4
+                  )}x`
+                );
+              } else {
+                console.log(
+                  `  ⚠️ WebSocket: Invalid SDK leverage (${leverageValue}), keeping fallback`
+                );
+              }
             } catch (e) {
               console.log(
-                `  ❌ Account leverage calculation failed: ${e.message}`
+                `  ❌ WebSocket: Account leverage calculation failed: ${e.message}`
               );
             }
 
@@ -2322,9 +2334,10 @@ async function fetchPositionsForWallet(walletAddress) {
             console.log(`  ❌ Debug comparison failed: ${debugError.message}`);
           }
 
+          // Remove artificial 50x cap to show real leverage values
           actualLeverage = Math.max(
             0.01,
-            Math.min(Math.round(actualLeverage * 10000) / 10000, 50)
+            Math.round(actualLeverage * 10000) / 10000
           );
           console.log(`  Final leverage: ${actualLeverage}x`);
 

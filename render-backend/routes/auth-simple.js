@@ -198,8 +198,7 @@ router.post("/create-account", validateCreateAccount, async (req, res) => {
       email,
       avatar_url: avatar_url || null,
       swig_wallet_address:
-        req.body.swigWalletAddress ||
-        "GKYPWkWtiXVPdzv6EimbTWx7PCL4Pv5wggTW5cFtCvYm", // Default test wallet
+        req.body.swigWalletAddress || `placeholder_${uuidv4().slice(0, 8)}`, // Unique placeholder until user connects wallet
       auth_method: "email", // Simple email auth method
       joined_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
