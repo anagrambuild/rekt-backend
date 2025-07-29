@@ -8,6 +8,7 @@ require("dotenv").config();
 const authRoutes = require("./routes/auth-simple");
 const userRoutes = require("./routes/users");
 const uploadRoutes = require("./routes/upload");
+const marketRoutes = require("./routes/markets");
 
 // Import middleware
 const supabaseMiddleware = require("./middleware/supabase");
@@ -69,6 +70,7 @@ app.get("/health", (req, res) => {
 app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/upload", uploadRoutes);
+app.use("/api/markets", marketRoutes);
 
 // Health check endpoint for Render
 app.get("/health", (req, res) => {
