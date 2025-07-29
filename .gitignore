@@ -113,3 +113,6 @@ pids
 # Temporary folders
 tmp/
 temp/
+
+# Prettier configuration
+.prettierrc
