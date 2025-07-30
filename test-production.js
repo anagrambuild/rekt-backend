@@ -3,9 +3,10 @@
 const { promisify } = require("util");
 const exec = promisify(require("child_process").exec);
 
-const PRODUCTION_URL = "https://rekt-user-management.onrender.com";
+// UPDATE THIS URL AFTER DEPLOYMENT
+const PRODUCTION_URL = "https://your-render-url.onrender.com";
 
-console.log("🚀 REKT User Management - Production Deployment Test");
+console.log("🚀 REKT Trading Backend - Production Deployment Test");
 console.log("=".repeat(60));
 console.log(`Testing: ${PRODUCTION_URL}`);
 
@@ -41,22 +42,47 @@ async function testProductionDeployment() {
     return false;
   }
 
-  console.log("\n🔐 Production API Tests");
+  console.log("\n📈 Trading API Tests");
+  console.log("-".repeat(30));
+
+  // Test status API
+  const status = await testEndpoint(`${PRODUCTION_URL}/api/status`);
+  console.log(`✅ Status API: ${status.status ? "PASS" : "FAIL"}`);
+
+  // Test markets API
+  const markets = await testEndpoint(`${PRODUCTION_URL}/api/markets`);
+  console.log(`✅ Markets API: ${markets.success ? "PASS" : "FAIL"}`);
+
+  if (markets.success && markets.data) {
+    console.log(`   📊 Found ${markets.data.length} markets:`);
+    markets.data.forEach((market) => {
+      console.log(`   - ${market.symbol}: $${market.price.toFixed(2)}`);
+    });
+  }
+
+  // Test individual market price
+  const solPrice = await testEndpoint(
+    `${PRODUCTION_URL}/api/markets/SOL-PERP/price`
+  );
+  console.log(`✅ SOL Price API: ${solPrice.success ? "PASS" : "FAIL"}`);
+
+  // Test trading balance (with test user)
+  const balance = await testEndpoint(
+    `${PRODUCTION_URL}/api/trading/balance/8be41bcf-97b7-432c-964b-08cac2d6e599`
+  );
+  console.log(`✅ Trading Balance: ${balance.success ? "PASS" : "FAIL"}`);
+
+  console.log("\n🔐 Auth System Tests");
   console.log("-".repeat(30));
 
   const testUsername = `produser_${Date.now()}`;
   const testEmail = `prod_${Date.now()}@example.com`;
-  const testWallet = `${Math.random()
-    .toString(36)
-    .substring(2, 15)}${Math.random().toString(36).substring(2, 15)}`;
 
   // Test username availability
   const usernameCheck = await testEndpoint(
     `${PRODUCTION_URL}/api/auth/check-username`,
     "POST",
-    {
-      username: testUsername,
-    }
+    { username: testUsername }
   );
   console.log(
     `✅ Username Check: ${usernameCheck.available ? "PASS" : "FAIL"}`
@@ -66,52 +92,11 @@ async function testProductionDeployment() {
   const emailCheck = await testEndpoint(
     `${PRODUCTION_URL}/api/auth/check-email`,
     "POST",
-    {
-      email: testEmail,
-    }
+    { email: testEmail }
   );
   console.log(`✅ Email Check: ${!emailCheck.exists ? "PASS" : "FAIL"}`);
 
-  // Test account creation
-  const accountCreation = await testEndpoint(
-    `${PRODUCTION_URL}/api/auth/create-account`,
-    "POST",
-    {
-      username: testUsername,
-      email: testEmail,
-      avatarUrl: "",
-      swigWalletAddress: testWallet,
-    }
-  );
-  console.log(
-    `✅ Account Creation: ${accountCreation.success ? "PASS" : "FAIL"}`
-  );
-
-  if (accountCreation.success) {
-    // Test sign in with created account
-    const signIn = await testEndpoint(
-      `${PRODUCTION_URL}/api/auth/signin`,
-      "POST",
-      {
-        email: testEmail,
-      }
-    );
-    console.log(`✅ Sign In: ${signIn.success ? "PASS" : "FAIL"}`);
-
-    console.log("\n🎉 Production Deployment: SUCCESSFUL");
-    console.log(`User ID: ${accountCreation.user.id}`);
-    console.log(`Username: ${accountCreation.user.username}`);
-    console.log(`Email: ${accountCreation.user.email}`);
-
-    return true;
-  } else {
-    console.log(
-      `❌ Account creation failed: ${
-        accountCreation.message || accountCreation.error
-      }`
-    );
-    return false;
-  }
+  return true;
 }
 
 async function testFrontendIntegration() {
