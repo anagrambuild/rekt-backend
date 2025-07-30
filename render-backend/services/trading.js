@@ -136,10 +136,7 @@ class TradingService {
         `📊 Position size: $${positionSize}, Margin required: $${marginRequired}`
       );
 
-      // Create position ID using UUID
-      const positionId = uuidv4();
-
-      // Record trade in database - try with minimal required fields first
+      // Record trade in database first to get the real ID
       const tradeData = {
         user_id: userId,
         principal_invested: marginRequired,
@@ -159,21 +156,18 @@ class TradingService {
         .select()
         .single();
 
+      let positionId;
       if (error) {
         console.error("❌ Database insert error:", error);
         // For MVP, continue without database storage but log the issue
         console.log("⚠️ Continuing with in-memory trade for MVP testing");
 
-        // Return mock trade data for MVP
-        const mockTrade = {
-          id: positionId,
-          ...tradeData,
-          created_at: new Date().toISOString(),
-        };
-
-        console.log("✅ Using mock trade data for MVP:", mockTrade);
-        // Don't throw error, continue with mock data
+        // Generate fallback UUID for mock data
+        positionId = uuidv4();
+        console.log("✅ Using mock trade data for MVP with ID:", positionId);
       } else {
+        // Use the database-generated ID
+        positionId = trade.id;
         console.log("✅ Trade successfully recorded in database:", trade.id);
       }
 
