@@ -43,7 +43,7 @@ if (window.ethereum) {
 class DriftAPIInterface {
   constructor() {
     // Centralized port configuration - change this one variable to update all endpoints
-    const SERVER_PORT = 3004;
+    const SERVER_PORT = 3005;
 
     this.config = {
       // API and WebSocket endpoints - automatically use SERVER_PORT
@@ -263,9 +263,13 @@ class DriftAPIInterface {
         this.ws.close();
       }
 
-      // Create new WebSocket connection
-      console.log("🔗 Creating new WebSocket connection");
-      this.ws = new WebSocket(this.config.wsEndpoint);
+      // Create new WebSocket connection with user ID
+      const userId = window.currentUser?.id;
+      const wsUrl = userId
+        ? `${this.config.wsUrl}/ws?userId=${userId}`
+        : `${this.config.wsUrl}/ws`;
+      console.log("🔗 Creating new WebSocket connection:", wsUrl);
+      this.ws = new WebSocket(wsUrl);
       // Connection opened
       this.ws.addEventListener("open", () => {
         console.log("✅ Connected to WebSocket server");
@@ -273,18 +277,20 @@ class DriftAPIInterface {
         this.config.isConnecting = false;
         this.updateConnectionStatus("Connected", "success");
 
-        // Subscribe to updates for all markets
+        // Subscribe to price updates
         this.ws.send(
           JSON.stringify({
-            type: "subscribe",
-            channel: "trades",
-            symbol: "ALL",
+            type: "subscribe_prices",
           })
         );
 
-        // Register wallet immediately if connected
-        if (this.config.walletAddress) {
-          this.registerWalletWithWebSocket();
+        // Subscribe to position updates if user is authenticated
+        if (window.currentUser?.id) {
+          this.ws.send(
+            JSON.stringify({
+              type: "subscribe_positions",
+            })
+          );
         }
 
         // Start heartbeat to keep connection alive
@@ -906,7 +912,14 @@ class DriftAPIInterface {
     resultDiv.textContent = "Loading...";
 
     try {
-      const response = await fetch(`/api/markets/positions/${wallet}`);
+      const userId = window.currentUser?.id;
+      if (!userId) {
+        throw new Error("User not authenticated");
+      }
+
+      const response = await fetch(
+        `${this.config.apiUrl}/trading/positions/${userId}`
+      );
       const result = await response.json();
 
       if (result.success) {
@@ -1200,9 +1213,14 @@ class DriftAPIInterface {
     try {
       this.logMessage("info", `🔍 Fetching USDC balance via backend proxy...`);
 
-      // Use backend proxy with Syndica RPC for reliable connectivity
+      // Use render-backend trading API for balance
+      const userId = window.currentUser?.id;
+      if (!userId) {
+        throw new Error("User not authenticated");
+      }
+
       const response = await fetch(
-        `/api/wallet/${this.config.walletAddress}/usdc-balance`
+        `${this.config.apiUrl}/trading/balance/${userId}`
       );
 
       if (!response.ok) {
@@ -1211,17 +1229,17 @@ class DriftAPIInterface {
 
       const data = await response.json();
 
-      if (data.error) {
-        throw new Error(`Backend Error: ${data.error}`);
+      if (!data.success) {
+        throw new Error(`Backend Error: ${data.error || "Unknown error"}`);
       }
 
-      const usdcBalance = data.balance || 0;
+      const usdcBalance = data.data.usdc || 0;
       this.usdcBalance = usdcBalance;
       this.updateBalanceDisplay(usdcBalance);
 
       this.logMessage(
         "success",
-        `💵 USDC balance: $${usdcBalance.toFixed(2)} (via Syndica RPC)`
+        `💵 USDC balance: $${usdcBalance.toFixed(2)} (via Swig wallet)`
       );
     } catch (error) {
       this.logMessage(
@@ -1480,17 +1498,22 @@ class DriftAPIInterface {
         "Creating trade transaction via backend API..."
       );
 
-      const response = await fetch("/api/trade/submit", {
+      const userId = window.currentUser?.id;
+      if (!userId) {
+        throw new Error("User not authenticated");
+      }
+
+      const response = await fetch(`${this.config.apiUrl}/trading/open`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          walletAddress: this.config.walletAddress,
-          tradeAmount: tradeAmount,
-          leverage: this.currentLeverage,
+          userId: userId,
+          asset: this.selectedMarket,
           direction: this.tradeDirection,
-          marketSymbol: this.selectedMarket,
+          amount: tradeAmount,
+          leverage: this.currentLeverage,
         }),
       });
 
@@ -2127,16 +2150,19 @@ class DriftAPIInterface {
       // Call the close position API to get transaction data
       this.showTradeStatus("loading", "Creating close position transaction...");
 
-      const closeResponse = await fetch("/api/trade/close", {
+      const userId = window.currentUser?.id;
+      if (!userId) {
+        throw new Error("User not authenticated");
+      }
+
+      const closeResponse = await fetch(`${this.config.apiUrl}/trading/close`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          walletAddress: this.config.walletAddress,
-          market: position.market,
-          direction: position.direction,
-          size: position.size.toString(),
+          userId: userId,
+          positionId: positionId,
         }),
       });
 
