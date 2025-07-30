@@ -143,6 +143,49 @@ router.get(
   })
 );
 
+// GET /api/trading/history/:userId - Get user's complete trading history
+router.get(
+  "/history/:userId",
+  asyncHandler(async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { status } = req.query; // Optional filter: ?status=open or ?status=closed
+
+      if (!userId) {
+        return res
+          .status(400)
+          .json(
+            createErrorResponse(
+              new Error("Missing userId"),
+              "User ID is required",
+              400
+            )
+          );
+      }
+
+      console.log(
+        `📚 Fetching trading history for user: ${userId}, status filter: ${
+          status || "all"
+        }`
+      );
+
+      // Get trading history using trading service
+      const history = await tradingService.getTradingHistory(userId, status);
+
+      res.json(
+        createSuccessResponse(history, "Trading history retrieved successfully")
+      );
+    } catch (error) {
+      console.error("❌ Error fetching trading history:", error);
+      res
+        .status(500)
+        .json(
+          createErrorResponse(error, "Failed to fetch trading history", 500)
+        );
+    }
+  })
+);
+
 // POST /api/trading/close - Close a position
 router.post(
   "/close",

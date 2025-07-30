@@ -395,6 +395,173 @@ class TradingService {
   }
 
   /**
+   * Get user's complete trading history (all trades)
+   */
+  async getTradingHistory(userId, statusFilter = null) {
+    try {
+      console.log(
+        `📚 Fetching trading history for user: ${userId}, status: ${
+          statusFilter || "all"
+        }`
+      );
+
+      // Build query with optional status filter
+      let query = supabase
+        .from("trades")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false });
+
+      // Add status filter if provided
+      if (
+        statusFilter &&
+        ["open", "closed", "liquidated", "cancelled"].includes(statusFilter)
+      ) {
+        query = query.eq("status", statusFilter);
+      }
+
+      const { data: trades, error } = await query;
+
+      if (error) {
+        throw new Error(`Failed to fetch trading history: ${error.message}`);
+      }
+
+      if (!trades || trades.length === 0) {
+        return [];
+      }
+
+      // Get current market prices for PnL calculation on open positions
+      const { driftClient } = await this.createMockDriftClient();
+
+      const history = [];
+
+      for (const trade of trades) {
+        try {
+          const asset = `${trade.asset}-PERP`;
+          const marketIndex = SUPPORTED_MARKETS[asset];
+
+          let currentPrice = parseFloat(trade.entry_price); // Default to entry price
+          let pnl = parseFloat(trade.pnl_usd) || 0;
+          let pnlPercentage = parseFloat(trade.pnl_percentage) || 0;
+
+          // For open positions, calculate current PnL
+          if (trade.status === "open" && marketIndex !== undefined) {
+            try {
+              const oracleData = await driftClient.getOracleDataForPerpMarket(
+                marketIndex
+              );
+              currentPrice =
+                oracleData.price.toNumber() / PRICE_PRECISION.toNumber();
+
+              // Calculate current PnL for open positions
+              const entryPrice = parseFloat(trade.entry_price);
+              const positionSize = parseFloat(trade.position_size);
+              const isLong = trade.direction === "long";
+
+              if (isLong) {
+                pnl = (currentPrice - entryPrice) * (positionSize / entryPrice);
+              } else {
+                pnl = (entryPrice - currentPrice) * (positionSize / entryPrice);
+              }
+
+              pnlPercentage =
+                (pnl / parseFloat(trade.principal_invested)) * 100;
+            } catch (priceError) {
+              console.warn(
+                `⚠️ Could not get current price for ${trade.asset}:`,
+                priceError.message
+              );
+            }
+          }
+
+          // Calculate liquidation price (simplified)
+          const leverage = parseFloat(trade.leverage_amount);
+          const entryPrice = parseFloat(trade.entry_price);
+          const isLong = trade.direction === "long";
+          const liquidationThreshold = 0.9; // 90% of margin
+          let liquidationPrice = 0;
+
+          if (isLong) {
+            liquidationPrice =
+              entryPrice * (1 - liquidationThreshold / leverage);
+          } else {
+            liquidationPrice =
+              entryPrice * (1 + liquidationThreshold / leverage);
+          }
+
+          history.push({
+            id: trade.id,
+            asset,
+            direction: trade.direction,
+            status: trade.status,
+            size: parseFloat(trade.position_size),
+            entryPrice: parseFloat(trade.entry_price),
+            exitPrice: trade.exit_price ? parseFloat(trade.exit_price) : null,
+            currentPrice:
+              trade.status === "open"
+                ? currentPrice
+                : trade.exit_price
+                ? parseFloat(trade.exit_price)
+                : parseFloat(trade.entry_price),
+            pnl: parseFloat(pnl.toFixed(2)),
+            pnlPercentage: parseFloat(pnlPercentage.toFixed(2)),
+            leverage,
+            liquidationPrice: parseFloat(liquidationPrice.toFixed(2)),
+            marginUsed: parseFloat(trade.principal_invested),
+            openedAt: trade.created_at,
+            closedAt: trade.exit_time,
+            duration: trade.exit_time
+              ? Math.floor(
+                  (new Date(trade.exit_time) - new Date(trade.created_at)) /
+                    1000
+                )
+              : Math.floor((new Date() - new Date(trade.created_at)) / 1000),
+            fees: parseFloat(trade.fees) || 0,
+            points: trade.points_earned || 0,
+          });
+        } catch (tradeError) {
+          console.warn(
+            `⚠️ Error processing trade ${trade.id}:`,
+            tradeError.message
+          );
+          // Add basic trade info even if price calculation fails
+          history.push({
+            id: trade.id,
+            asset: `${trade.asset}-PERP`,
+            direction: trade.direction,
+            status: trade.status,
+            size: parseFloat(trade.position_size),
+            entryPrice: parseFloat(trade.entry_price),
+            exitPrice: trade.exit_price ? parseFloat(trade.exit_price) : null,
+            currentPrice: parseFloat(trade.entry_price),
+            pnl: parseFloat(trade.pnl_usd) || 0,
+            pnlPercentage: parseFloat(trade.pnl_percentage) || 0,
+            leverage: parseFloat(trade.leverage_amount),
+            liquidationPrice: 0,
+            marginUsed: parseFloat(trade.principal_invested),
+            openedAt: trade.created_at,
+            closedAt: trade.exit_time,
+            duration: trade.exit_time
+              ? Math.floor(
+                  (new Date(trade.exit_time) - new Date(trade.created_at)) /
+                    1000
+                )
+              : Math.floor((new Date() - new Date(trade.created_at)) / 1000),
+            fees: parseFloat(trade.fees) || 0,
+            points: trade.points_earned || 0,
+          });
+        }
+      }
+
+      console.log(`✅ Found ${history.length} trades in history`);
+      return history;
+    } catch (error) {
+      console.error("❌ Error fetching trading history:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Get user's balance (mock implementation for MVP)
    */
   async getBalance(userId) {
