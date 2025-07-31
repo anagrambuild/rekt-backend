@@ -9,7 +9,7 @@
  * node test-real-profile.js <profile-id>
  *
  * EXAMPLE:
- * node test-real-profile.js 489aebd6-1cdf-4788-9872-6d022c33352c
+ * node test-real-profile.js <profile_id>
  */
 
 const TradingService = require("../services/trading");

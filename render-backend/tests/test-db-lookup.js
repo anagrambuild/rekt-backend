@@ -8,7 +8,7 @@
  * node test-db-lookup.js [profile-id]
  *
  * EXAMPLE:
- * node test-db-lookup.js 489aebd6-1cdf-4788-9872-6d022c33352c
+ * node test-db-lookup.js <profile_id>
  *
  * If no profile-id is provided, uses the default test profile ID
  */
@@ -93,7 +93,7 @@ async function testDatabaseLookup(profileId) {
 }
 
 // Get profile ID from command line
-const profileId = process.argv[2] || "489aebd6-1cdf-4788-9872-6d022c33352c";
+const profileId = process.argv[2] || "<profile_id>";
 
 console.log("🧪 Database Lookup Test\n");
 testDatabaseLookup(profileId);

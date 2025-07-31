@@ -8,8 +8,8 @@
  * node test-close-position.js <profile-id> [position-id]
  *
  * EXAMPLES:
- * node test-close-position.js 489aebd6-1cdf-4788-9872-6d022c33352c
- * node test-close-position.js 489aebd6-1cdf-4788-9872-6d022c33352c b1068989-5351-47cc-bc3a-73beff92c185
+ * node test-close-position.js <profile_id>
+ * node test-close-position.js <profile_id> b1068989-5351-47cc-bc3a-73beff92c185
  *
  * If no position-id is provided, it will close all open positions for the user
  */
@@ -190,9 +190,7 @@ const positionId = process.argv[3];
 if (!profileId) {
   console.log("❌ Please provide a profile ID as an argument");
   console.log("Usage: node test-close-position.js <profile-id> [position-id]");
-  console.log(
-    "Example: node test-close-position.js 489aebd6-1cdf-4788-9872-6d022c33352c"
-  );
+  console.log("Example: node test-close-position.js <profile_id>");
   process.exit(1);
 }
 

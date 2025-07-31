@@ -13,7 +13,7 @@
  * node test-production-real.js
  *
  * EXAMPLES:
- * node test-production-real.js 489aebd6-1cdf-4788-9872-6d022c33352c
+ * node test-production-real.js <profile_id>
  * node test-production-real.js test-user-id
  */
 
@@ -21,7 +21,7 @@
 // 📝 EDIT THIS VARIABLE TO SET YOUR PROFILE ID
 // ============================================================
 const PROFILE_ID = "test-user-id"; // Change this to your profile ID
-// const PROFILE_ID = "489aebd6-1cdf-4788-9872-6d022c33352c"; // Example real profile
+// const PROFILE_ID = "<profile_id>"; // Example real profile
 // ============================================================
 const fetch = require("node-fetch");
 
@@ -306,9 +306,7 @@ async function main() {
     console.log("");
     console.log("OPTION 1 - Command Line Argument:");
     console.log("  node test-production-real.js <profile-id>");
-    console.log(
-      "  Example: node test-production-real.js 489aebd6-1cdf-4788-9872-6d022c33352c"
-    );
+    console.log("  Example: node test-production-real.js <profile_id>");
     console.log("");
     console.log("OPTION 2 - Edit PROFILE_ID variable in this file:");
     console.log('  const PROFILE_ID = "your-profile-id-here";');

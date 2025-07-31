@@ -21,8 +21,8 @@
  * const PROFILE_ID = "your-profile-id-here";
  *
  * # Examples with real profile ID:
- * node test-comprehensive.js --full 489aebd6-1cdf-4788-9872-6d022c33352c
- * node test-comprehensive.js --open 489aebd6-1cdf-4788-9872-6d022c33352c
+ * node test-comprehensive.js --full <profile_id>
+ * node test-comprehensive.js --open <profile_id>
  *
  * # Examples with test user (default):
  * node test-comprehensive.js --full
@@ -33,7 +33,7 @@
 // 📝 EDIT THIS VARIABLE TO SET YOUR DEFAULT PROFILE ID
 // ============================================================
 const PROFILE_ID = "test-user-id"; // Change this to your profile ID
-// const PROFILE_ID = "489aebd6-1cdf-4788-9872-6d022c33352c"; // Example real profile
+// const PROFILE_ID = "<profile_id>"; // Example real profile
 // ============================================================
 const TradingService = require("../services/trading");
 
@@ -524,7 +524,7 @@ async function main() {
         console.log("   --close     # Test close positions");
         console.log("   --history   # Test trading history");
         console.log(
-          "\nExample: node test-comprehensive.js --full 489aebd6-1cdf-4788-9872-6d022c33352c"
+          "\nExample: node test-comprehensive.js --full <profile_id>"
         );
         process.exit(1);
     }

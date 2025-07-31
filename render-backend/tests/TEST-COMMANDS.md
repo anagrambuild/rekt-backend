@@ -8,7 +8,7 @@
 cd /Users/timk/projects/rekt-backend/render-backend
 
 # OPTION 1: Command line argument
-node tests/test-comprehensive.js --full 489aebd6-1cdf-4788-9872-6d022c33352c
+node tests/test-comprehensive.js --full <profile_id>
 
 # OPTION 2: Edit PROFILE_ID variable in file, then run
 node tests/test-comprehensive.js --full
@@ -18,7 +18,7 @@ node tests/test-comprehensive.js --full
 
 ```bash
 # OPTION 1: Command line argument
-node tests/test-production-real.js 489aebd6-1cdf-4788-9872-6d022c33352c
+node tests/test-production-real.js <profile_id>
 
 # OPTION 2: Edit PROFILE_ID variable in file, then run
 node tests/test-production-real.js
@@ -91,7 +91,7 @@ node tests/test-comprehensive.js --full
 ### **Production Mode (Real User)**
 
 ```bash
-node tests/test-comprehensive.js --full 489aebd6-1cdf-4788-9872-6d022c33352c
+node tests/test-comprehensive.js --full <profile_id>
 # Uses: Real profile ID from your database
 ```
 
@@ -184,12 +184,12 @@ To test against the live production API:
 
 ```bash
 # Test production balance endpoint
-curl -X GET "https://rekt-user-management.onrender.com/api/trading/balance/489aebd6-1cdf-4788-9872-6d022c33352c"
+curl -X GET "https://rekt-user-management.onrender.com/api/trading/balance/<profile_id>"
 
 # Test production position opening
 curl -X POST "https://rekt-user-management.onrender.com/api/trading/open" \
   -H "Content-Type: application/json" \
-  -d '{"userId": "489aebd6-1cdf-4788-9872-6d022c33352c", "asset": "SOL-PERP", "direction": "long", "amount": 25, "leverage": 5}'
+  -d '{"userId": "<profile_id>", "asset": "SOL-PERP", "direction": "long", "amount": 25, "leverage": 5}'
 ```
 
 ## ✅ What This Proves
