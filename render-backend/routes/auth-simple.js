@@ -9,8 +9,23 @@ const {
 
 const router = express.Router();
 
+// Validate Solana public key format
+const validateSolanaAddress = address => {
+  if (!address || typeof address !== "string") {
+    return { valid: false, message: "Wallet address is required" };
+  }
+
+  // Solana public keys are base58 encoded and typically 32-44 characters
+  const base58Regex = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+  if (!base58Regex.test(address)) {
+    return { valid: false, message: "Invalid Solana wallet address format" };
+  }
+
+  return { valid: true };
+};
+
 // Generate username suggestions
-const generateUsernameSuggestions = (baseUsername) => {
+const generateUsernameSuggestions = baseUsername => {
   const suggestions = [];
   const currentYear = new Date().getFullYear();
 
@@ -161,7 +176,19 @@ router.post("/signin", validateSignIn, async (req, res) => {
 // POST /api/auth/create-account - Create new account
 router.post("/create-account", validateCreateAccount, async (req, res) => {
   try {
-    const { username, email, avatar_url } = req.body;
+    const { username, email, avatar_url, wallet_address, swig_wallet_address } =
+      req.body;
+    // Validate wallet address if provided
+    if (wallet_address) {
+      const walletValidation = validateSolanaAddress(wallet_address);
+      if (!walletValidation.valid) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid wallet address",
+          message: walletValidation.message,
+        });
+      }
+    }
 
     // Check if username already exists
     const { data: existingUser } = await req.supabase
@@ -191,14 +218,33 @@ router.post("/create-account", validateCreateAccount, async (req, res) => {
       });
     }
 
+    // Check if wallet address already exists (if provided)
+    if (wallet_address) {
+      const { data: existingWallet } = await req.supabase
+        .from("profiles")
+        .select("wallet_address")
+        .eq("wallet_address", wallet_address)
+        .single();
+
+      if (existingWallet) {
+        return res.status(409).json({
+          success: false,
+          error: "Wallet address already exists",
+          message:
+            "The wallet address has already been created with an account",
+        });
+      }
+    }
+
     // Create new user
     const newUser = {
       id: uuidv4(),
       username,
       email,
       avatar_url: avatar_url || null,
+      wallet_address: wallet_address || null,
       swig_wallet_address:
-        req.body.swigWalletAddress || `placeholder_${uuidv4().slice(0, 8)}`, // Unique placeholder until user connects wallet
+        swig_wallet_address || `placeholder_${uuidv4().slice(0, 8)}`, // Unique placeholder until user connects wallet
       auth_method: "email", // Simple email auth method
       joined_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -222,6 +268,8 @@ router.post("/create-account", validateCreateAccount, async (req, res) => {
         username: createdUser.username,
         email: createdUser.email,
         avatar_url: createdUser.avatar_url,
+        wallet_address: createdUser.wallet_address,
+        swig_wallet_address: createdUser.swig_wallet_address,
         joined_at: createdUser.joined_at,
       },
       message: "Account created successfully",
