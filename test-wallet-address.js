@@ -6,7 +6,7 @@ const TEST_WALLET = `${Date.now()
   .toString()
   .slice(
     -6
-  )}${"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789".slice(
+  )}${"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".slice(
   0,
   38
 )}`; // Unique mock wallet
@@ -14,7 +14,7 @@ const TEST_USER = {
   username: `test${Date.now().toString().slice(-6)}`, // Unique username (max 10 chars)
   email: `test_${Date.now()}@example.com`, // Unique email
   wallet_address: TEST_WALLET,
-  swigWalletAddress: `swig_${Date.now()}`, // Mock Swig wallet
+  swig_wallet_address: `swig_${Date.now()}`, // Mock Swig wallet
 };
 
 async function testWalletAddressFunctionality() {
@@ -26,7 +26,7 @@ async function testWalletAddressFunctionality() {
     console.log(`   Username: ${TEST_USER.username}`);
     console.log(`   Email: ${TEST_USER.email}`);
     console.log(`   Wallet Address: ${TEST_USER.wallet_address}`);
-    console.log(`   Swig Wallet: ${TEST_USER.swigWalletAddress}\n`);
+    console.log(`   Swig Wallet: ${TEST_USER.swig_wallet_address}\n`);
 
     const createResponse = await axios.post(
       `${BASE_URL}/api/auth/create-account`,
@@ -82,7 +82,7 @@ async function testWalletAddressFunctionality() {
       username: `dup${Date.now().toString().slice(-6)}`,
       email: `duplicate_${Date.now()}@example.com`,
       wallet_address: TEST_WALLET, // Same wallet address
-      swigWalletAddress: "different_swig_wallet",
+      swig_wallet_address: "different_swig_wallet",
     };
 
     try {

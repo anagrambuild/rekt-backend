@@ -176,8 +176,8 @@ router.post("/signin", validateSignIn, async (req, res) => {
 // POST /api/auth/create-account - Create new account
 router.post("/create-account", validateCreateAccount, async (req, res) => {
   try {
-    const { username, email, avatar_url, wallet_address } = req.body;
-
+    const { username, email, avatar_url, wallet_address, swig_wallet_address } =
+      req.body;
     // Validate wallet address if provided
     if (wallet_address) {
       const walletValidation = validateSolanaAddress(wallet_address);
@@ -244,7 +244,7 @@ router.post("/create-account", validateCreateAccount, async (req, res) => {
       avatar_url: avatar_url || null,
       wallet_address: wallet_address || null,
       swig_wallet_address:
-        req.body.swigWalletAddress || `placeholder_${uuidv4().slice(0, 8)}`, // Unique placeholder until user connects wallet
+        swig_wallet_address || `placeholder_${uuidv4().slice(0, 8)}`, // Unique placeholder until user connects wallet
       auth_method: "email", // Simple email auth method
       joined_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
