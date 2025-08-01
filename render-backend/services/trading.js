@@ -38,18 +38,33 @@ class TradingService {
   }
 
   /**
-   * Get user's Swig wallet address from database
+   * Get user's regular wallet address for fee payment
    */
-  async getUserSwigWallet(userId) {
+  async getUserWalletAddress(userId) {
     try {
-      // For testing, allow test user IDs with environment-based test wallet
-      if (userId === "test-user-id") {
-        const testWallet =
-          process.env.TEST_SWIG_WALLET ||
-          "GKYPWkWtiXVPdzv6EimbTWx7PCL4Pv5wggTW5cFtCvYm";
-        console.log(`✅ Using test Swig wallet for testing: ${testWallet}`);
-        return testWallet;
+      const { data: user, error } = await supabase
+        .from("profiles")
+        .select("wallet_address, username")
+        .eq("id", userId)
+        .single();
+
+      if (error) {
+        throw new Error(`User not found: ${error.message}`);
       }
+
+      if (!user.wallet_address) {
+        throw new Error("User does not have a wallet address");
+      }
+
+      console.log(
+        `✅ Found wallet address for user ${user.username}: ${user.wallet_address}`
+      );
+      return user.wallet_address;
+    } catch (error) {
+      console.error("❌ Error fetching user wallet address:", error);
+      throw error;
+    }
+  }
 
       const { data: user, error } = await supabase
         .from("profiles")
@@ -114,8 +129,9 @@ class TradingService {
         `🚀 Opening position: ${direction} ${asset} with ${leverage}x leverage, amount: $${amount}`
       );
 
-      // Get user's Swig wallet
+      // Get user's wallet addresses
       const swigWalletAddress = await this.getUserSwigWallet(userId);
+      const regularWalletAddress = await this.getUserWalletAddress(userId);
       const publicKey = new PublicKey(swigWalletAddress);
 
       // Apply rate limiting
@@ -208,7 +224,7 @@ class TradingService {
               instructions,
               blockhash,
               lastValidBlockHeight,
-              feePayer: swigWalletAddress,
+              feePayer: regularWalletAddress,
             },
             nextStep: "Enable high leverage mode, then retry the trade",
           };
@@ -347,7 +363,7 @@ class TradingService {
             instructions,
             blockhash,
             lastValidBlockHeight,
-            feePayer: swigWalletAddress,
+            feePayer: regularWalletAddress,
             assetPrice: currentPrice,
             assetQuantity: assetQuantity,
           },
