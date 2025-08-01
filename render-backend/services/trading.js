@@ -608,6 +608,35 @@ class TradingService {
   }
 
   /**
+   * Get user's regular wallet address (for testing)
+   */
+  async getUserWalletAddress(userId) {
+    try {
+      const { data: user, error } = await supabase
+        .from("profiles")
+        .select("wallet_address, username")
+        .eq("id", userId)
+        .single();
+
+      if (error) {
+        throw new Error(`User not found: ${error.message}`);
+      }
+
+      if (!user.wallet_address) {
+        throw new Error("User does not have a wallet address");
+      }
+
+      console.log(
+        `✅ Found wallet address for user ${user.username}: ${user.wallet_address}`
+      );
+      return user.wallet_address;
+    } catch (error) {
+      console.error("❌ Error fetching user wallet address:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Get user's balance using their Swig wallet address
    */
   async getBalance(userId) {
@@ -662,7 +691,7 @@ class TradingService {
 
       // Fallback to mock data if real balance fails
       console.log("⚠️ Falling back to mock balance data");
-      const swigWalletAddress = await this.getUserSwigWallet(userId);
+      const walletAddress = await this.getUserWalletAddress(userId);
 
       return {
         usdc: 1000.0, // Mock USDC balance

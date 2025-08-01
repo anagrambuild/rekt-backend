@@ -1,10 +1,24 @@
 const express = require("express");
+const { PublicKey } = require("@solana/web3.js");
+const { createClient } = require("@supabase/supabase-js");
 const {
   asyncHandler,
   createErrorResponse,
   createSuccessResponse,
+  createConnection,
+  getUSDCMint,
 } = require("../utils");
+
 const TradingService = require("../services/trading");
+
+// Initialize Supabase client
+const supabaseUrl =
+  process.env.SUPABASE_URL || "https://amgeuvathssbhopfvubw.supabase.co";
+const supabaseServiceKey =
+  process.env.SUPABASE_SERVICE_KEY ||
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFtZ2V1dmF0aHNzYmhvcGZ2dWJ3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NzUwNTQwMywiZXhwIjoyMDYzMDgxNDAzfQ.2kojQiE653EyG4OUVtufj7cEzU_SwMiUMvovGJwIp4E";
+
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
 const router = express.Router();
 
@@ -252,6 +266,212 @@ router.get(
       res
         .status(500)
         .json(createErrorResponse(error, "Failed to fetch balance", 500));
+    }
+  })
+);
+
+// GET /api/trading/wallet-balance/:userId - Get user's wallet USDC balance from Solana blockchain
+router.get(
+  "/wallet-balance/:userId",
+  asyncHandler(async (req, res) => {
+    try {
+      const { userId } = req.params;
+      console.log(`🔍 Fetching wallet balance for user: ${userId}`);
+
+      // Get user's wallet address from database
+      const { data: user, error } = await supabase
+        .from("profiles")
+        .select("wallet_address, username")
+        .eq("id", userId)
+        .single();
+
+      if (error) {
+        return res
+          .status(404)
+          .json(
+            createErrorResponse(
+              new Error("User not found"),
+              "User not found in database",
+              404
+            )
+          );
+      }
+
+      if (!user.wallet_address) {
+        return res
+          .status(400)
+          .json(
+            createErrorResponse(
+              new Error("No wallet address"),
+              "User does not have a wallet address",
+              400
+            )
+          );
+      }
+
+      const walletAddress = user.wallet_address;
+      console.log(
+        `🔍 Using wallet address for ${user.username}: ${walletAddress}`
+      );
+
+      // Parse wallet address to PublicKey
+      let publicKey;
+      try {
+        publicKey = new PublicKey(walletAddress);
+      } catch (e) {
+        console.error(`❌ Invalid wallet address: ${walletAddress}`, e);
+        return res
+          .status(400)
+          .json(
+            createErrorResponse(
+              new Error("Invalid wallet address format"),
+              "Invalid Solana wallet address format",
+              400
+            )
+          );
+      }
+
+      // Create connection
+      const connection = await createConnection();
+      console.log(`✅ Connected to Solana RPC`);
+
+      // Fetch USDC token accounts
+      console.log(`🔍 Fetching token accounts for wallet: ${walletAddress}`);
+      const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+        publicKey,
+        { mint: getUSDCMint() }
+      );
+
+      console.log(`📊 Found ${tokenAccounts.value.length} USDC token accounts`);
+
+      // Calculate total USDC balance
+      let usdcBalance = 0;
+      tokenAccounts.value.forEach((account, index) => {
+        try {
+          const amount = account.account.data.parsed.info.tokenAmount.uiAmount;
+          console.log(`  - Account ${index + 1}: ${amount} USDC`);
+          usdcBalance += amount;
+        } catch (e) {
+          console.error(`Error processing token account ${index}:`, e);
+        }
+      });
+
+      console.log(
+        `💰 Total USDC balance for ${
+          user.username
+        } (${walletAddress}): $${usdcBalance.toFixed(2)}`
+      );
+
+      res.json(
+        createSuccessResponse(
+          {
+            balance: usdcBalance,
+            wallet: walletAddress,
+            username: user.username,
+            tokenAccounts: tokenAccounts.value.length,
+          },
+          "User wallet USDC balance retrieved successfully"
+        )
+      );
+    } catch (error) {
+      console.error("❌ Error fetching user wallet balance:", error);
+      res
+        .status(500)
+        .json(
+          createErrorResponse(error, "Failed to fetch user wallet balance", 500)
+        );
+    }
+  })
+);
+
+// GET /api/wallet/:walletAddress/usdc-balance - Get direct USDC balance from Solana blockchain
+router.get(
+  "/wallet/:walletAddress/usdc-balance",
+  asyncHandler(async (req, res) => {
+    try {
+      const { walletAddress } = req.params;
+      console.log(`🔍 Fetching USDC balance for wallet: ${walletAddress}`);
+
+      // Validate wallet address
+      if (
+        !walletAddress ||
+        walletAddress.length < 32 ||
+        walletAddress.length > 44
+      ) {
+        return res
+          .status(400)
+          .json(
+            createErrorResponse(
+              new Error("Invalid wallet address"),
+              "Wallet address must be a valid Solana address",
+              400
+            )
+          );
+      }
+
+      // Parse wallet address to PublicKey
+      let publicKey;
+      try {
+        publicKey = new PublicKey(walletAddress);
+      } catch (e) {
+        console.error(`❌ Invalid wallet address: ${walletAddress}`, e);
+        return res
+          .status(400)
+          .json(
+            createErrorResponse(
+              new Error("Invalid wallet address format"),
+              "Invalid Solana wallet address format",
+              400
+            )
+          );
+      }
+
+      // Create connection
+      const connection = await createConnection();
+      console.log(`✅ Connected to Solana RPC`);
+
+      // Fetch USDC token accounts
+      console.log(`🔍 Fetching token accounts for wallet: ${walletAddress}`);
+      const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+        publicKey,
+        { mint: getUSDCMint() }
+      );
+
+      console.log(`📊 Found ${tokenAccounts.value.length} USDC token accounts`);
+
+      // Calculate total USDC balance
+      let usdcBalance = 0;
+      tokenAccounts.value.forEach((account, index) => {
+        try {
+          const amount = account.account.data.parsed.info.tokenAmount.uiAmount;
+          console.log(`  - Account ${index + 1}: ${amount} USDC`);
+          usdcBalance += amount;
+        } catch (e) {
+          console.error(`Error processing token account ${index}:`, e);
+        }
+      });
+
+      console.log(
+        `💰 Total USDC balance for ${walletAddress}: $${usdcBalance.toFixed(2)}`
+      );
+
+      res.json(
+        createSuccessResponse(
+          {
+            balance: usdcBalance,
+            wallet: walletAddress,
+            tokenAccounts: tokenAccounts.value.length,
+          },
+          "USDC balance retrieved successfully"
+        )
+      );
+    } catch (error) {
+      console.error("❌ Error fetching wallet USDC balance:", error);
+      res
+        .status(500)
+        .json(
+          createErrorResponse(error, "Failed to fetch wallet USDC balance", 500)
+        );
     }
   })
 );
