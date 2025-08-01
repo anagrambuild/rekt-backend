@@ -1,4 +1,4 @@
-const { PublicKey } = require("@solana/web3.js");
+const { PublicKey, ComputeBudgetProgram } = require("@solana/web3.js");
 const {
   DriftClient,
   initialize,
@@ -17,6 +17,7 @@ const {
   createConnection,
   createDriftClient,
   cleanupDriftClient,
+  getUSDCMint,
   PRICE_PRECISION: PRICE_PRECISION_UTIL,
 } = require("../utils");
 const { SUPPORTED_MARKETS, DRIFT_CLUSTER } = require("../constants");
@@ -104,7 +105,7 @@ class TradingService {
   }
 
   /**
-   * Open a new position using real Drift SDK
+   * Open a new position using real Drift SDK with blockchain transaction creation
    */
   async openPosition(userId, asset, direction, amount, leverage) {
     try {
@@ -114,6 +115,7 @@ class TradingService {
 
       // Get user's Swig wallet
       const swigWalletAddress = await this.getUserSwigWallet(userId);
+      const publicKey = new PublicKey(swigWalletAddress);
 
       // Create real Drift client
       const { driftClient, connection } = await this.createDriftClient(
@@ -138,15 +140,164 @@ class TradingService {
           `💰 Current ${asset} price from oracle: $${currentPrice.toFixed(2)}`
         );
 
-        // Calculate position size
+        // Calculate position parameters
         const positionSize = amount * leverage;
         const marginRequired = amount;
+        const positionValueUSD = positionSize;
+        const assetQuantity = (positionValueUSD / currentPrice).toFixed(6);
 
         console.log(
-          `📊 Position size: $${positionSize}, Margin required: $${marginRequired}`
+          `📊 Position size: $${positionSize}, Margin required: $${marginRequired}, Asset quantity: ${assetQuantity}`
         );
 
-        // Record trade in database
+        // Check if high leverage mode is enabled
+        const userAccount = await driftClient.getUserAccount();
+        const isHighLeverageEnabled =
+          userAccount.marginMode &&
+          userAccount.marginMode.highLeverage !== undefined;
+
+        console.log(`🚀 High leverage mode enabled: ${isHighLeverageEnabled}`);
+
+        // Auto-enable high leverage mode if needed for leverage > 5x
+        if (leverage > 5 && !isHighLeverageEnabled) {
+          console.log("🚀 High leverage mode required but not enabled");
+
+          const enableHighLeverageIx =
+            await driftClient.getEnableHighLeverageModeIx();
+          const { blockhash, lastValidBlockHeight } =
+            await connection.getLatestBlockhash("confirmed");
+          const computeBudgetInstruction =
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 });
+
+          const instructions = [
+            {
+              programId: computeBudgetInstruction.programId.toString(),
+              data: Buffer.from(computeBudgetInstruction.data).toString(
+                "base64"
+              ),
+              keys: computeBudgetInstruction.keys.map(key => ({
+                pubkey: key.pubkey.toString(),
+                isSigner: key.isSigner,
+                isWritable: key.isWritable,
+              })),
+            },
+            {
+              programId: enableHighLeverageIx.programId.toString(),
+              data: Buffer.from(enableHighLeverageIx.data).toString("base64"),
+              keys: enableHighLeverageIx.keys.map(key => ({
+                pubkey: key.pubkey.toString(),
+                isSigner: key.isSigner,
+                isWritable: key.isWritable,
+              })),
+            },
+          ];
+
+          return {
+            success: true,
+            message: "High leverage mode must be enabled first",
+            requiresHighLeverageMode: true,
+            transactionData: {
+              instructions,
+              blockhash,
+              lastValidBlockHeight,
+              feePayer: swigWalletAddress,
+            },
+            nextStep: "Enable high leverage mode, then retry the trade",
+          };
+        }
+
+        // Create order parameters
+        const orderParams = {
+          orderType: OrderType.Market,
+          marketIndex,
+          direction:
+            direction.toLowerCase() === "long"
+              ? PositionDirection.Long
+              : PositionDirection.Short,
+          baseAssetAmount: new BN(Math.abs(assetQuantity * Math.pow(10, 9))), // Convert to base units
+          price: new BN(currentPrice * PRICE_PRECISION.toNumber()),
+          marketType: MarketType.Perp,
+        };
+
+        console.log(`📋 Order parameters:`, {
+          orderType: "Market",
+          marketIndex,
+          direction: direction.toLowerCase() === "long" ? "Long" : "Short",
+          baseAssetAmount: orderParams.baseAssetAmount.toString(),
+          price: orderParams.price.toString(),
+        });
+
+        // Create trade instruction
+        const orderIx = await driftClient.getPlacePerpOrderIx(orderParams);
+
+        // Get deposit instruction if needed
+        let depositIx = null;
+        const depositAmount = Math.min(amount, 200); // Cap deposit at $200 for high leverage
+
+        if (depositAmount > 0) {
+          const tokenAccounts = await connection.getTokenAccountsByOwner(
+            publicKey,
+            { mint: getUSDCMint() }
+          );
+
+          if (tokenAccounts.value.length > 0) {
+            const userTokenAccount = tokenAccounts.value[0].pubkey;
+            depositIx = await driftClient.getDepositInstruction(
+              new BN(depositAmount * 1e6), // Convert to USDC lamports (6 decimals)
+              0, // Collateral index (0 for USDC)
+              userTokenAccount
+            );
+            console.log(
+              `💰 Deposit instruction created: $${depositAmount} USDC`
+            );
+          } else {
+            console.log("⚠️ No USDC token accounts found for deposit");
+          }
+        }
+
+        // Create final transaction
+        const { blockhash, lastValidBlockHeight } =
+          await connection.getLatestBlockhash("confirmed");
+        const computeBudgetInstruction =
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
+
+        const instructions = [
+          {
+            programId: computeBudgetInstruction.programId.toString(),
+            data: Buffer.from(computeBudgetInstruction.data).toString("base64"),
+            keys: computeBudgetInstruction.keys.map(key => ({
+              pubkey: key.pubkey.toString(),
+              isSigner: key.isSigner,
+              isWritable: key.isWritable,
+            })),
+          },
+        ];
+
+        // Add deposit instruction if available
+        if (depositIx) {
+          instructions.push({
+            programId: depositIx.programId.toString(),
+            data: Buffer.from(depositIx.data).toString("base64"),
+            keys: depositIx.keys.map(key => ({
+              pubkey: key.pubkey.toString(),
+              isSigner: key.isSigner,
+              isWritable: key.isWritable,
+            })),
+          });
+        }
+
+        // Add trade instruction
+        instructions.push({
+          programId: orderIx.programId.toString(),
+          data: Buffer.from(orderIx.data).toString("base64"),
+          keys: orderIx.keys.map(key => ({
+            pubkey: key.pubkey.toString(),
+            isSigner: key.isSigner,
+            isWritable: key.isWritable,
+          })),
+        });
+
+        // Record trade in database with pending status
         const tradeData = {
           user_id: userId,
           principal_invested: marginRequired,
@@ -155,7 +306,7 @@ class TradingService {
           asset: asset.replace("-PERP", ""), // Store as SOL, BTC, ETH
           direction: direction.toLowerCase(),
           position_size: positionSize,
-          status: "open",
+          status: "pending", // Mark as pending until transaction is confirmed
         };
 
         console.log("📝 Recording trade in database:", tradeData);
@@ -169,7 +320,6 @@ class TradingService {
         let positionId;
         if (error) {
           console.error("❌ Database insert error:", error);
-          // Generate fallback UUID for mock data
           positionId = uuidv4();
           console.log("⚠️ Using fallback position ID:", positionId);
         } else {
@@ -177,19 +327,35 @@ class TradingService {
           console.log("✅ Trade successfully recorded in database:", trade.id);
         }
 
-        console.log(`✅ Position opened successfully: ${positionId}`);
+        console.log(
+          `✅ ${leverage}x ${direction} trade created successfully for ${asset}`
+        );
 
+        // Return transaction data for frontend to sign and submit
         return {
+          success: true,
           positionId: positionId,
-          asset,
-          direction,
-          amount,
-          leverage,
-          entryPrice: currentPrice,
-          positionSize,
-          marginUsed: marginRequired,
-          status: "open",
-          openedAt: new Date().toISOString(),
+          transactionData: {
+            instructions,
+            blockhash,
+            lastValidBlockHeight,
+            feePayer: swigWalletAddress,
+            assetPrice: currentPrice,
+            assetQuantity: assetQuantity,
+          },
+          message: `${direction.toUpperCase()} order ready for ${asset} (${assetQuantity} @ $${currentPrice.toFixed(
+            2
+          )})`,
+          tradeDetails: {
+            asset,
+            direction,
+            amount,
+            leverage,
+            entryPrice: currentPrice,
+            positionSize,
+            marginUsed: marginRequired,
+            depositAmount: depositAmount,
+          },
         };
       } finally {
         // Clean up Drift client
