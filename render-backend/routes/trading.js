@@ -277,10 +277,10 @@ router.get(
       const { userId } = req.params;
       console.log(`🔍 Fetching wallet balance for user: ${userId}`);
 
-      // Get user's wallet address from database
+      // Get user's Swig wallet address from database
       const { data: user, error } = await supabase
         .from("profiles")
-        .select("wallet_address, username")
+        .select("swig_wallet_address, username")
         .eq("id", userId)
         .single();
 
@@ -296,34 +296,37 @@ router.get(
           );
       }
 
-      if (!user.wallet_address) {
+      if (!user.swig_wallet_address) {
         return res
           .status(400)
           .json(
             createErrorResponse(
-              new Error("No wallet address"),
-              "User does not have a wallet address",
+              new Error("No Swig wallet address"),
+              "User does not have a Swig wallet address",
               400
             )
           );
       }
 
-      const walletAddress = user.wallet_address;
+      const swigWalletAddress = user.swig_wallet_address;
       console.log(
-        `🔍 Using wallet address for ${user.username}: ${walletAddress}`
+        `🔍 Using Swig wallet address for ${user.username}: ${swigWalletAddress}`
       );
 
-      // Parse wallet address to PublicKey
+      // Parse Swig wallet address to PublicKey
       let publicKey;
       try {
-        publicKey = new PublicKey(walletAddress);
+        publicKey = new PublicKey(swigWalletAddress);
       } catch (e) {
-        console.error(`❌ Invalid wallet address: ${walletAddress}`, e);
+        console.error(
+          `❌ Invalid Swig wallet address: ${swigWalletAddress}`,
+          e
+        );
         return res
           .status(400)
           .json(
             createErrorResponse(
-              new Error("Invalid wallet address format"),
+              new Error("Invalid Swig wallet address format"),
               "Invalid Solana wallet address format",
               400
             )
@@ -334,8 +337,10 @@ router.get(
       const connection = await createConnection();
       console.log(`✅ Connected to Solana RPC`);
 
-      // Fetch USDC token accounts
-      console.log(`🔍 Fetching token accounts for wallet: ${walletAddress}`);
+      // Fetch USDC token accounts for Swig wallet
+      console.log(
+        `🔍 Fetching token accounts for Swig wallet: ${swigWalletAddress}`
+      );
       const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
         publicKey,
         { mint: getUSDCMint() }
@@ -356,20 +361,21 @@ router.get(
       });
 
       console.log(
-        `💰 Total USDC balance for ${
+        `💰 Total Swig wallet USDC balance for ${
           user.username
-        } (${walletAddress}): $${usdcBalance.toFixed(2)}`
+        } (${swigWalletAddress}): $${usdcBalance.toFixed(2)}`
       );
 
       res.json(
         createSuccessResponse(
           {
             balance: usdcBalance,
-            wallet: walletAddress,
+            wallet: swigWalletAddress,
             username: user.username,
             tokenAccounts: tokenAccounts.value.length,
+            walletType: "swig",
           },
-          "User wallet USDC balance retrieved successfully"
+          "Swig wallet USDC balance retrieved successfully"
         )
       );
     } catch (error) {
