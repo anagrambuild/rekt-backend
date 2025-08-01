@@ -18,6 +18,7 @@ const {
   createDriftClient,
   cleanupDriftClient,
   getUSDCMint,
+  retryWithBackoff,
   PRICE_PRECISION: PRICE_PRECISION_UTIL,
 } = require("../utils");
 const { SUPPORTED_MARKETS, DRIFT_CLUSTER } = require("../constants");
@@ -117,10 +118,17 @@ class TradingService {
       const swigWalletAddress = await this.getUserSwigWallet(userId);
       const publicKey = new PublicKey(swigWalletAddress);
 
-      // Create real Drift client
-      const { driftClient, connection } = await this.createDriftClient(
-        swigWalletAddress
-      );
+      // Apply rate limiting
+      await rpcRateLimit();
+
+      // Create real Drift client with retry logic
+      let driftClient, connection;
+      await retryWithBackoff(async () => {
+        console.log("🌊 Initializing Drift client for trade...");
+        const clientData = await this.createDriftClient(swigWalletAddress);
+        driftClient = clientData.driftClient;
+        connection = clientData.connection;
+      });
 
       try {
         // Get market index
