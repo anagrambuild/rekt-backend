@@ -122,11 +122,27 @@ async function createDriftClient(connection, walletAddress) {
     // Initialize Drift SDK
     await initialize({ env: DRIFT_CLUSTER });
 
-    // Create wallet instance
+    // Create wallet instance - for swig wallets, we'll use the address as signer
     const wallet = new Wallet({
       publicKey: new PublicKey(walletAddress),
-      signTransaction: () => Promise.reject(new Error("Read-only client")),
-      signAllTransactions: () => Promise.reject(new Error("Read-only client")),
+      signTransaction: async transaction => {
+        // In production, this would delegate to the swig wallet for signing
+        console.log(
+          `🔐 Transaction signing requested for swig wallet: ${walletAddress}`
+        );
+        console.log(`📋 Transaction would be sent to swig wallet for signing`);
+        // For now, return the transaction unsigned (swig wallet will handle signing)
+        return transaction;
+      },
+      signAllTransactions: async transactions => {
+        console.log(
+          `🔐 Batch transaction signing requested for swig wallet: ${walletAddress}`
+        );
+        console.log(
+          `📋 ${transactions.length} transactions would be sent to swig wallet for signing`
+        );
+        return transactions;
+      },
     });
 
     // Create Drift client

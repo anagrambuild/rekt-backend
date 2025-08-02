@@ -11,7 +11,7 @@ const router = express.Router();
 // Initialize trading service
 const tradingService = new TradingService();
 
-// POST /api/trading/open - Open a new position
+// POST /api/trading/open - Open a new position (returns transaction data for signing)
 router.post(
   "/open",
   asyncHandler(async (req, res) => {
@@ -88,7 +88,7 @@ router.post(
         `🚀 Opening position: ${direction} ${asset} with ${leverage}x leverage, amount: $${amount}`
       );
 
-      // Open position using trading service
+      // Open position using trading service (returns transaction data)
       const result = await tradingService.openPosition(
         userId,
         asset,
@@ -97,12 +97,30 @@ router.post(
         leverage
       );
 
-      res.json(createSuccessResponse(result, "Position opened successfully"));
+      if (result.needsInitialization || result.initializationRequired) {
+        // User needs to initialize Drift account first
+        return res.json(
+          createSuccessResponse(result, "Drift account initialization required")
+        );
+      }
+
+      res.json(
+        createSuccessResponse(
+          result,
+          "Position transaction created successfully"
+        )
+      );
     } catch (error) {
       console.error("❌ Error opening position:", error);
       res
         .status(500)
-        .json(createErrorResponse(error, "Failed to open position", 500));
+        .json(
+          createErrorResponse(
+            error,
+            "Failed to create position transaction",
+            500
+          )
+        );
     }
   })
 );
@@ -186,7 +204,7 @@ router.get(
   })
 );
 
-// POST /api/trading/close - Close a position
+// POST /api/trading/close - Close a position (returns transaction data for signing)
 router.post(
   "/close",
   asyncHandler(async (req, res) => {
@@ -207,15 +225,26 @@ router.post(
 
       console.log(`🔒 Closing position: ${positionId} for user: ${userId}`);
 
-      // Close position using trading service
+      // Close position using trading service (returns transaction data)
       const result = await tradingService.closePosition(userId, positionId);
 
-      res.json(createSuccessResponse(result, "Position closed successfully"));
+      res.json(
+        createSuccessResponse(
+          result,
+          "Position close transaction created successfully"
+        )
+      );
     } catch (error) {
       console.error("❌ Error closing position:", error);
       res
         .status(500)
-        .json(createErrorResponse(error, "Failed to close position", 500));
+        .json(
+          createErrorResponse(
+            error,
+            "Failed to create close position transaction",
+            500
+          )
+        );
     }
   })
 );
@@ -252,6 +281,172 @@ router.get(
       res
         .status(500)
         .json(createErrorResponse(error, "Failed to fetch balance", 500));
+    }
+  })
+);
+
+// POST /api/trading/confirm-transaction - Confirm a transaction was successful
+router.post(
+  "/confirm-transaction",
+  asyncHandler(async (req, res) => {
+    try {
+      const { userId, positionId, transactionId, type } = req.body;
+
+      if (!userId || !positionId || !transactionId || !type) {
+        return res
+          .status(400)
+          .json(
+            createErrorResponse(
+              new Error("Missing required fields"),
+              "userId, positionId, transactionId, and type are required",
+              400
+            )
+          );
+      }
+
+      console.log(
+        `✅ Confirming ${type} transaction: ${transactionId} for position: ${positionId}`
+      );
+
+      // Update trade status based on transaction type
+      let updateData = {};
+
+      if (type === "open") {
+        updateData = {
+          status: "open",
+          transaction_id: transactionId,
+          opened_at: new Date().toISOString(),
+        };
+      } else if (type === "close") {
+        updateData = {
+          status: "closed",
+          close_transaction_id: transactionId,
+          exit_time: new Date().toISOString(),
+        };
+      }
+
+      // Update trade in database
+      const { error } = await req.supabase
+        .from("trades")
+        .update(updateData)
+        .eq("id", positionId)
+        .eq("user_id", userId);
+
+      if (error) {
+        throw new Error(`Failed to update trade: ${error.message}`);
+      }
+
+      console.log(`✅ Transaction confirmed and trade updated: ${positionId}`);
+
+      res.json(
+        createSuccessResponse(
+          { positionId, transactionId, type, status: "confirmed" },
+          "Transaction confirmed successfully"
+        )
+      );
+    } catch (error) {
+      console.error("❌ Error confirming transaction:", error);
+      res
+        .status(500)
+        .json(createErrorResponse(error, "Failed to confirm transaction", 500));
+    }
+  })
+);
+
+// POST /api/trading/submit - Submit signed transaction to blockchain
+router.post(
+  "/submit",
+  asyncHandler(async (req, res) => {
+    try {
+      const { signedTransaction, walletAddress, positionId } = req.body;
+
+      if (!signedTransaction) {
+        return res
+          .status(400)
+          .json(
+            createErrorResponse(
+              new Error("Missing signed transaction data"),
+              "signedTransaction is required",
+              400
+            )
+          );
+      }
+
+      console.log(
+        `📤 Submitting signed transaction for wallet: ${walletAddress}`
+      );
+
+      try {
+        // Convert base64 back to buffer
+        const txBuffer = Buffer.from(signedTransaction, "base64");
+
+        // Create connection
+        const { createConnection } = require("../utils");
+        const connection = await createConnection();
+
+        // Send the raw transaction directly
+        console.log("📤 Sending raw transaction to Solana network...");
+        const signature = await connection.sendRawTransaction(txBuffer, {
+          skipPreflight: false,
+          preflightCommitment: "confirmed",
+          maxRetries: 3,
+        });
+
+        console.log("✅ Transaction submitted, signature:", signature);
+
+        // Wait for confirmation
+        console.log("⏳ Waiting for transaction confirmation...");
+        const confirmation = await connection.confirmTransaction({
+          signature,
+          blockhash: null,
+          commitment: "confirmed",
+          maxRetries: 3,
+        });
+
+        console.log("🎉 Transaction confirmed:", confirmation);
+
+        // Update trade record with real transaction ID if positionId provided
+        if (positionId) {
+          await req.supabase
+            .from("trades")
+            .update({
+              transaction_id: signature,
+              status: "open",
+            })
+            .eq("id", positionId);
+
+          console.log(
+            `✅ Updated trade record ${positionId} with transaction ${signature}`
+          );
+        }
+
+        res.json(
+          createSuccessResponse(
+            {
+              signature,
+              confirmation: {
+                slot: confirmation.context.slot,
+                confirmations: null,
+                confirmationStatus: "confirmed",
+                err: null,
+              },
+            },
+            "Transaction submitted and confirmed successfully"
+          )
+        );
+      } catch (txError) {
+        console.error("❌ Transaction submission error:", txError);
+        res
+          .status(500)
+          .json(
+            createErrorResponse(txError, "Failed to submit transaction", 500)
+          );
+      }
+    } catch (error) {
+      console.error("❌ Error in transaction submission handler:", error);
+      res
+        .status(500)
+        .json(createErrorResponse(error, "Internal server error", 500));
     }
   })
 );
