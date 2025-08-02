@@ -66,7 +66,7 @@ router.get("/profile/:id", async (req, res) => {
     const { data: user, error } = await req.supabase
       .from("profiles")
       .select(
-        "id, username, email, avatar_url, swig_wallet_address, joined_at, updated_at"
+        "id, username, email, avatar_url, wallet_address, swig_wallet_address, joined_at, updated_at"
       )
       .eq("id", id)
       .single();
