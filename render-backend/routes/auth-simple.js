@@ -99,7 +99,9 @@ router.post("/check-email", async (req, res) => {
     // Check if email exists in database
     const { data, error } = await req.supabase
       .from("profiles")
-      .select("id, username, email, avatar_url")
+      .select(
+        "id, username, email, avatar_url, wallet_address, swig_wallet_address"
+      )
       .eq("email", email)
       .single();
 
@@ -160,6 +162,8 @@ router.post("/signin", validateSignIn, async (req, res) => {
         username: user.username,
         email: user.email,
         avatar_url: user.avatar_url,
+        wallet_address: user.wallet_address,
+        swig_wallet_address: user.swig_wallet_address,
         joined_at: user.joined_at,
       },
       message: "Sign in successful",
